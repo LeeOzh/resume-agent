@@ -566,11 +566,11 @@ def download_resume(browser, candidate_name, download_dir, index, ai_config=None
         pages_before = len(context.pages)
         element.click()
 
-        try:
-            context.wait_for_event("page", timeout=8000)
-        except:
-            pass
-        time.sleep(2)
+        # 等待新标签页出现（替代固定 sleep(2)）
+        for _ in range(16):
+            time.sleep(0.5)
+            if len(context.pages) > pages_before:
+                break
 
         pages = context.pages
         if len(pages) <= pages_before:
@@ -580,18 +580,25 @@ def download_resume(browser, candidate_name, download_dir, index, ai_config=None
         
         detail_page = pages[-1]
 
-        # 等待附件按钮出现（替代固定 sleep，出现即继续）
+        # 尝试查找附件按钮（最多2次，每次间隔1s）
         print(f"      查找附件...")
-        attachment_selectors = [
-            'span:has-text("附件个人信息")',
-            ':text("附件个人信息")',
-            'span:text-is("附件个人信息")',
-        ]
-        attachment_btn = wait_for_element(detail_page, attachment_selectors, timeout=10)
+        attachment_btn = None
+        for attempt in range(2):
+            time.sleep(1)
+            for sel in ['span:has-text("附件个人信息")', ':text("附件个人信息")']:
+                try:
+                    el = detail_page.query_selector(sel)
+                    if el and el.is_visible():
+                        attachment_btn = el
+                        break
+                except:
+                    continue
+            if attachment_btn:
+                break
 
         if not attachment_btn:
             result["error"] = "未找到附件按钮"
-            print(f"      未找到附件按钮")
+            print(f"      未找到附件按钮（无附件简历）")
             detail_page.close()
             return result
 
