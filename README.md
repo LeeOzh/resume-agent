@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-基于 Python + Playwright 的浏览器自动化工具，用于从前程无忧（51job）网页版自动下载候选人简历。
+基于 Python + Playwright 的浏览器自动化工具，用于从前程无忧（51job）网页版自动下载候选人简历，支持 AI 简历筛选。
 
 ## 当前开发进度
 
@@ -10,21 +10,20 @@
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| Chrome CDP 连接 | ✅ 完成 | 通过 Remote Debugging 接管已登录的浏览器 |
+| Chrome CDP 连接 | ✅ 完成 | 通过 Remote Debugging 接接管已登录的浏览器 |
 | 候选人列表解析 | ✅ 完成 | 解析 `.item.virtual_list` 元素获取候选人信息 |
-| 虚拟滚动处理 | ✅ 完成 | 使用 Page Down 键盘事件触发虚拟滚动加载 |
+| 虚拟滚动处理 | ✅ 完成 | 使用鼠标滚轮触发虚拟滚动加载 |
 | 详情页打开 | ✅ 完成 | 点击候选人进入新标签页详情 |
 | 附件简历下载 | ✅ 完成 | 点击"附件个人信息" → 点击"下载"按钮 |
 | 结果统计 | ✅ 完成 | 显示成功/失败数量和详细信息 |
-
-### 待开发功能
-
-| 功能 | 状态 | 说明 |
-|------|------|------|
-| 分页处理 | ⏳ 待开发 | 下载完当前页后自动翻到下一页继续 |
-| 结果导出 Excel | ⏳ 待开发 | 输出下载结果到 result.xlsx |
-| 日志记录 | ⏳ 待开发 | 记录运行日志到 logs/app.log |
-| 配置化 | ⏳ 待开发 | 支持自定义下载路径、最大数量等 |
+| 分页处理 | ✅ 完成 | 下载完当前页后自动检测分页控件并翻页继续 |
+| 结果导出 Excel | ✅ 完成 | 输出下载结果到 `output/result_时间戳.xlsx` |
+| 配置化 | ✅ 完成 | `config.py` 支持自定义下载路径、最大数量等 |
+| 职位切换 | ✅ 完成 | 自动检测页面职位 tab，支持切换不同岗位下载 |
+| AI 简历筛选 | ✅ 完成 | 接入 MiMo-V2.5-Pro，下载前 AI 评估简历是否匹配 |
+| 岗位匹配描述 | ✅ 完成 | 支持多岗位独立配置匹配描述，持久化存储 |
+| 下载可中断 | ✅ 完成 | Ctrl+C 中断下载，已处理数据保留并导出 Excel |
+| 滚动调试工具 | ✅ 完成 | 菜单 `9` 测试分页控件，菜单 `0` 测试多种滚动方案 |
 
 ## 技术架构
 
@@ -33,6 +32,7 @@
 - Python 3.11+
 - Playwright (浏览器自动化)
 - pandas + openpyxl (Excel 输出)
+- openai SDK (MiMo API 调用)
 - PyInstaller (打包为 exe)
 
 ### 项目结构
@@ -40,18 +40,12 @@
 ```
 resume-agent/
 ├── main.py              # 主程序
+├── config.py            # 配置文件（含 AI 配置持久化）
 ├── browser/
 │   └── chrome.py        # Chrome CDP 连接
 ├── crawler/
 │   └── candidate.py     # 候选人解析
-├── downloader/
-│   └── file.py          # 文件下载
-├── output/
-│   ├── resumes/         # 简历存放目录
-│   └── result.xlsx      # 结果输出
-├── logs/
-│   └── app.log          # 运行日志
-├── config.py            # 配置文件
+├── build.spec           # PyInstaller 打包配置
 ├── requirements.txt     # 依赖列表
 └── README.md            # 项目说明
 ```
@@ -64,26 +58,52 @@ resume-agent/
 
 ```python
 def collect_all_candidates_with_scroll(page):
-    """通过滚动收集所有候选人"""
-    # 点击页面获取焦点
-    page.click('body')
-    
-    # 使用 Page Down 键盘事件滚动
-    page.keyboard.press('PageDown')
-    
-    # 每次滚动后获取新出现的候选人
-    # 重复直到没有新候选人
+    # 移动鼠标到页面中间
+    page.mouse.move(600, 400)
+    # 使用鼠标滚轮滚动
+    page.mouse.wheel(0, 600)
+    # 连续滚动直到无新增候选人（3轮无新增停止）
+```
+
+### 分页处理
+
+前程无忧页面使用自定义分页组件 `.eh-pagination`：
+
+```python
+def has_next_page(page):
+    # 检测 .eh-pagination__next.btn-next 是否 disabled
+
+def go_to_next_page(page):
+    # 点击下一页，等待页码变化或候选人列表刷新
+```
+
+### AI 简历筛选
+
+接入小米 MiMo-V2.5-Pro 模型，下载前自动评估简历：
+
+```python
+def evaluate_resume(resume_text, match_description, api_key):
+    # 使用 OpenAI SDK 调用 MiMo API
+    # 从 attachment 预览页读取简历文本
+    # AI 返回 {"match": true/false, "reason": "..."}
+    # 匹配才下载，不匹配跳过
 ```
 
 ### 简历下载流程
 
 ```
-1. 点击候选人 → 新标签页打开详情
-2. 点击"附件个人信息"按钮
-3. 等待附件简历页面打开
-4. 点击"下载"按钮
-5. 保存文件到本地
-6. 关闭标签页，继续下一个
+1. 选择职位 tab → 切换到目标岗位
+2. 选择 AI 匹配描述（多选一）
+3. 滚动收集当前页所有候选人
+4. 逐个处理：
+   a. 点击候选人 → 新标签页打开详情
+   b. 等待"附件个人信息"按钮出现
+   c. 点击附件 → 等待下载按钮出现
+   d. AI 评估简历（如启用）
+   e. 匹配 → 下载；不匹配 → 跳过
+   f. 保存为 51job-姓名_岗位.pdf
+5. 检测分页 → 翻到下一页 → 重复
+6. 导出 Excel 结果汇总
 ```
 
 ## 使用方法
@@ -91,21 +111,15 @@ def collect_all_candidates_with_scroll(page):
 ### 开发环境
 
 ```bash
-# 安装依赖
 pip install -r requirements.txt
-
-# 安装 Playwright 浏览器
 playwright install chromium
-
-# 运行程序
 python main.py
 ```
 
 ### 打包为 exe
 
 ```bash
-# 使用 PyInstaller 打包
-pyinstaller --onefile --console --name resume-agent main.py
+pyinstaller build.spec
 ```
 
 ### 使用步骤
@@ -118,24 +132,25 @@ pyinstaller --onefile --console --name resume-agent main.py
 2. 在 Chrome 中登录前程无忧，进入候选人列表页面
 
 3. 运行程序，选择操作：
-   - `1` - 自动下载所有简历
+   - `1` - 自动下载所有简历（含职位选择 + AI 筛选）
    - `2` - 下载指定简历
+   - `5` - AI 简历筛选配置
    - `0` - 测试滚动功能（调试用）
-
-## 已知问题
-
-1. **虚拟滚动** - 页面使用虚拟滚动，需要通过键盘事件触发加载
-2. **下载按钮** - 部分候选人可能没有附件简历或下载按钮
-3. **分页** - 当前只能下载单页，需要开发分页功能
-
-## 下一步计划
-
-1. 实现分页处理 - 自动翻到下一页继续下载
-2. 添加结果导出 - 输出 Excel 格式的下载结果
-3. 添加日志记录 - 记录运行过程和错误信息
-4. 优化错误处理 - 处理网络异常、页面加载失败等情况
+   - `9` - 测试分页功能（调试用）
 
 ## 更新日志
+
+### 2026-08-10
+
+- 新增分页处理：自动检测 `.eh-pagination` 控件并翻页
+- 新增结果导出 Excel：`output/result_时间戳.xlsx`
+- 新增 AI 简历筛选：接入 MiMo-V2.5-Pro，下载前评估简历匹配度
+- 新增职位切换：自动检测页面职位 tab，支持多岗位独立下载
+- 新增岗位匹配描述管理：每个岗位独立配置筛选要求
+- 新增下载可中断：Ctrl+C 中断后保留已处理数据
+- 优化虚拟滚动：从 PageDown 改为鼠标滚轮方案
+- 优化附件/下载按钮查找：使用轮询等待替代固定 sleep
+- 简历命名规则：`51job-候选人姓名_岗位.pdf`
 
 ### 2026-08-07
 
