@@ -1176,8 +1176,9 @@ def main():
     download_dir.mkdir(parents=True, exist_ok=True)
 
     print("\n[1] 连接 Chrome 浏览器...")
+    print("    程序将自动检测并启动Chrome浏览器...")
     browser = ChromeBrowser()
-    if not browser.connect():
+    if not browser.connect(auto_launch=True, wait_login=True):
         print("\n按 Enter 键退出...")
         input()
         sys.exit(1)

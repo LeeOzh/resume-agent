@@ -15,8 +15,14 @@ def get_base_dir():
 # 项目根目录
 BASE_DIR = get_base_dir()
 
+# Chrome Remote Debugging 端口
+CHROME_DEBUG_PORT = 9222
+
 # Chrome Remote Debugging 地址
-CDP_ENDPOINT = "http://localhost:9222"
+CDP_ENDPOINT = f"http://localhost:{CHROME_DEBUG_PORT}"
+
+# Chrome 用户数据目录
+CHROME_PROFILE_DIR = Path(f"C:/chrome-debug-{CHROME_DEBUG_PORT}")
 
 # 下载路径
 DOWNLOAD_PATH = BASE_DIR / "output" / "resumes"
@@ -39,6 +45,18 @@ MIMO_MODEL = "mimo-v2.5-pro"
 
 # AI 配置文件路径
 AI_CONFIG_PATH = BASE_DIR / "ai_config.json"
+
+# 前程无忧人才管理页面URL
+URL_51JOB_TALENT_MANAGEMENT = "https://ehire.51job.com/Revision/talent/management"
+
+# 前程无忧候选人页面URL（兼容旧代码）
+URL_51JOB_CANDIDATES = "https://ehire.51job.com/candidates/resume/library.aspx"
+
+# 学校名单文件路径
+SCHOOL_LIST_PATH = BASE_DIR.parent / "2026可录用学校名单（软科排名300内）2026.4.30更新.xls"
+
+# 学校过滤配置文件路径
+SCHOOL_FILTER_CONFIG_PATH = BASE_DIR / "school_filter_config.json"
 
 
 def load_ai_config():
