@@ -22,7 +22,7 @@ CHROME_DEBUG_PORT = 9222
 CDP_ENDPOINT = f"http://localhost:{CHROME_DEBUG_PORT}"
 
 # Chrome 用户数据目录
-CHROME_PROFILE_DIR = Path(f"C:/chrome-debug-{CHROME_DEBUG_PORT}")
+CHROME_PROFILE_DIR = Path("C:/chrome-agent")
 
 # 下载路径
 DOWNLOAD_PATH = BASE_DIR / "output" / "resumes"
@@ -80,4 +80,23 @@ def load_ai_config():
 def save_ai_config(config):
     """保存 AI 配置"""
     with open(AI_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+
+def load_school_filter_config():
+    """加载学校过滤配置"""
+    if SCHOOL_FILTER_CONFIG_PATH.exists():
+        try:
+            with open(SCHOOL_FILTER_CONFIG_PATH, "r", encoding="utf-8") as f:
+                config = json.load(f)
+                if "school_list_path" in config:
+                    return config
+        except Exception:
+            pass
+    return {"school_list_path": str(SCHOOL_LIST_PATH)}
+
+
+def save_school_filter_config(config):
+    """保存学校过滤配置"""
+    with open(SCHOOL_FILTER_CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)

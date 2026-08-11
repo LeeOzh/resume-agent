@@ -39,7 +39,7 @@ def run(switch_job=''):
         sock.close()
 
         if not port_open:
-            result['error'] = f'调试端口 {CHROME_DEBUG_PORT} 未开放，请先启动Chrome调试模式'
+            result['error'] = f'调试端口 {CHROME_DEBUG_PORT} 未开放，Chrome 自动启动可能失败，请手动运行 启动Chrome.bat'
             return result
 
         # 连接浏览器

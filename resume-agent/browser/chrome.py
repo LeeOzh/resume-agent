@@ -24,7 +24,12 @@ class ChromeBrowser:
         self.port = port
         self.cdp_endpoint = f"http://localhost:{port}"
         self.chrome_process = None
-        self.profile_dir = Path(f"C:/chrome-debug-{port}")
+        # 使用统一的调试用户数据目录（与 启动Chrome.bat 一致，保留登录会话）
+        try:
+            from config import CHROME_PROFILE_DIR
+            self.profile_dir = Path(CHROME_PROFILE_DIR)
+        except Exception:
+            self.profile_dir = Path(f"C:/chrome-debug-{port}")
 
     def find_chrome_path(self) -> str:
         """从注册表获取Chrome安装路径"""
@@ -83,13 +88,17 @@ class ChromeBrowser:
                 pass
         return False
 
-    def launch_chrome(self) -> bool:
+    def launch_chrome(self, wait_seconds=30) -> bool:
         """自动启动Chrome调试模式"""
         chrome_path = self.find_chrome_path()
         if not chrome_path:
             return False
 
         try:
+            # 已有关联会话时，用户数据目录需独立；若端口已开则直接返回
+            if self.is_debug_port_open():
+                return True
+
             # 创建用户数据目录
             self.profile_dir.mkdir(parents=True, exist_ok=True)
 
@@ -111,8 +120,8 @@ class ChromeBrowser:
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
 
-            # 等待端口打开
-            for _ in range(30):  # 最多等待30秒
+            # 等待端口打开（最多 wait_seconds 秒）
+            for _ in range(wait_seconds):
                 time.sleep(1)
                 if self.is_debug_port_open():
                     return True
@@ -348,3 +357,15 @@ class ChromeBrowser:
                 self.playwright.stop()
             except Exception:
                 pass
+
+
+def ensure_chrome_debug(port=9222, wait_seconds=30) -> bool:
+    """
+    确保 Chrome 调试模式已启动
+
+    端口未开放时自动查找 Chrome 并以调试模式启动，等待端口就绪。
+    """
+    manager = ChromeBrowser(port=port)
+    if manager.is_debug_port_open():
+        return True
+    return manager.launch_chrome(wait_seconds=wait_seconds)

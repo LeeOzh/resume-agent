@@ -39,13 +39,13 @@ def refresh_worker_target(queue, switch_job):
         queue.put({'success': False, 'error': str(e)})
 
 
-def download_worker_target(queue, candidate_names, download_dir, job_name, 
-                           ai_config, download_all_pages, stop_event):
+def download_worker_target(queue, candidates, download_dir, job_name, 
+                           ai_config, download_all_pages, stop_event, task_id=None):
     """下载子进程目标函数"""
     try:
         from download_worker import run
-        result = run(candidate_names, download_dir, job_name, ai_config, 
-                    download_all_pages, stop_event)
+        result = run(candidates, download_dir, job_name, ai_config, 
+                    download_all_pages, stop_event, task_id)
         queue.put(result)
     except Exception as e:
         queue.put({'success': False, 'error': str(e)})
@@ -106,12 +106,13 @@ class MainWindow(QMainWindow):
         self.check_timer.timeout.connect(self.check_worker_status)
         self.result_queue = None
         self.current_task = None
+        self.worker_start_time = None
 
         # 尝试加载上次的学校名单
         self.load_last_school_list()
 
-        # 禁用自动刷新，避免启动时崩溃
-        # QTimer.singleShot(500, self.auto_refresh)
+        # 启动后自动尝试连接浏览器（带端口检测，避免启动崩溃）
+        QTimer.singleShot(500, self.auto_refresh)
 
     def load_stylesheet(self):
         try:
@@ -124,22 +125,47 @@ class MainWindow(QMainWindow):
 
     def load_last_school_list(self):
         """加载上次使用的学校名单路径"""
-        config_path = _BASE_DIR / "school_list_path.txt"
-        if config_path.exists():
+        path = ''
+        # 1. 统一配置文件 school_filter_config.json
+        try:
+            from config import load_school_filter_config
+            path = load_school_filter_config().get('school_list_path', '')
+        except Exception:
+            pass
+        # 2. 兼容旧的 school_list_path.txt
+        if not path or not Path(path).exists():
+            legacy_path = _BASE_DIR / "school_list_path.txt"
             try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    path = f.read().strip()
-                    if path and Path(path).exists():
-                        self.school_list_path = path
-                        self.load_school_list(path)
+                if legacy_path.exists():
+                    p = legacy_path.read_text(encoding="utf-8").strip()
+                    if p and Path(p).exists():
+                        path = p
+            except Exception:
+                pass
+        # 3. 回退到 config.py 的默认路径
+        if not path or not Path(path).exists():
+            try:
+                from config import SCHOOL_LIST_PATH
+                if SCHOOL_LIST_PATH.exists():
+                    path = str(SCHOOL_LIST_PATH)
             except Exception:
                 pass
 
+        if path:
+            self.school_list_path = path
+            self.load_school_list(path)
+
     def save_school_list_path(self, path):
         """保存学校名单路径"""
-        config_path = _BASE_DIR / "school_list_path.txt"
         try:
-            with open(config_path, "w", encoding="utf-8") as f:
+            from config import save_school_filter_config
+            save_school_filter_config({'school_list_path': path})
+        except Exception:
+            pass
+        # 兼容旧文件
+        try:
+            legacy_path = _BASE_DIR / "school_list_path.txt"
+            with open(legacy_path, "w", encoding="utf-8") as f:
                 f.write(path)
         except Exception:
             pass
@@ -394,13 +420,52 @@ class MainWindow(QMainWindow):
 
     def auto_refresh(self):
         """初始化自动获取"""
+        self.log("正在检查 Chrome 调试模式...")
+        if not self._ensure_chrome_debug():
+            return
         self.log("正在自动连接浏览器并获取候选人列表...")
-        self.refresh_candidates()
+        try:
+            self.refresh_candidates()
+        except Exception as e:
+            self.log(f"自动刷新失败: {e}")
+
+    def _is_chrome_port_open(self):
+        """检测 Chrome 调试端口是否已开放"""
+        try:
+            import socket
+            from config import CHROME_DEBUG_PORT
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            port_open = sock.connect_ex(('127.0.0.1', CHROME_DEBUG_PORT)) == 0
+            sock.close()
+            return port_open
+        except Exception:
+            return False
+
+    def _ensure_chrome_debug(self):
+        """确保 Chrome 调试模式已启动，未启动则自动启动"""
+        if self._is_chrome_port_open():
+            return True
+        self.log("未检测到 Chrome 调试模式，正在自动启动 Chrome...")
+        try:
+            from browser.chrome import ensure_chrome_debug
+            from config import CHROME_DEBUG_PORT
+            if ensure_chrome_debug(port=CHROME_DEBUG_PORT, wait_seconds=30):
+                self.log("Chrome 调试模式已启动")
+                return True
+            self.log("Chrome 调试模式启动失败或超时，请检查 Chrome 是否已安装")
+        except Exception as e:
+            self.log(f"自动启动 Chrome 异常: {e}")
+        return False
 
     def refresh_candidates(self, switch_job=''):
         """刷新候选人列表"""
         if self.worker_process and self.worker_process.is_alive():
             self.log("正在获取中，请等待...")
+            return
+
+        # 确保 Chrome 调试模式已启动（未启动时自动启动）
+        if not self._ensure_chrome_debug():
             return
 
         if switch_job:
@@ -410,6 +475,8 @@ class MainWindow(QMainWindow):
 
         self.set_buttons_enabled(False)
         self.current_task = 'refresh'
+        import time
+        self.worker_start_time = time.time()
 
         self.result_queue = multiprocessing.Queue()
 
@@ -438,11 +505,23 @@ class MainWindow(QMainWindow):
         ai_config = load_ai_config()
         download_all = self.download_all_check.isChecked()
 
-        if not ai_config.get("enabled"):
+        if ai_config.get("enabled") and ai_config.get("api_key"):
+            # 按当前职位查找匹配描述（job_descriptions -> match_description）
+            job_descs = ai_config.get("job_descriptions", {})
+            match_desc = job_descs.get(job_name, '')
+            ai_config["match_description"] = match_desc
+            if not match_desc:
+                self.log("警告: 当前职位未配置匹配描述，AI 将按空描述评估")
+        else:
             ai_config = None
 
         # 重置中断信号
         self.stop_event.clear()
+
+        # 同步创建数据库任务，确保 task_id 在下载子进程启动前可用
+        task_id = self._create_task_and_candidates(
+            job_name, ai_config, download_dir, download_all, len(selected)
+        )
 
         if download_all:
             self.log(f"开始下载所有页简历...")
@@ -456,41 +535,44 @@ class MainWindow(QMainWindow):
 
         self.set_buttons_enabled(False)
         self.current_task = 'download'
+        import time
+        self.worker_start_time = time.time()
 
         self.result_queue = multiprocessing.Queue()
 
-        # 传递stop_event给子进程
+        # 传递 stop_event 与 task_id 给子进程
         self.worker_process = multiprocessing.Process(
             target=download_worker_target,
             args=(self.result_queue, selected, download_dir, job_name, 
-                  ai_config, download_all, self.stop_event),
+                  ai_config, download_all, self.stop_event, task_id),
             daemon=True
         )
         self.worker_process.start()
 
-        # 异步创建数据库任务
-        self._async_create_task(job_name, ai_config, download_dir, download_all, len(selected))
-
         self.check_timer.start(500)
     
-    def _async_create_task(self, job_name, ai_config, download_dir, download_all, total):
-        """异步创建数据库任务"""
-        def do_create():
-            try:
-                task = self.db.create_task(
-                    job_name=job_name,
-                    ai_config=ai_config if ai_config else {},
-                    download_dir=download_dir,
-                    download_all_pages=download_all,
-                    total_candidates=total
-                )
-                self.current_task_id = task.id
-                self.db.add_task_log(task.id, 'info', f'开始下载 {total} 个候选人')
-            except Exception as e:
-                print(f"创建任务失败: {e}")
-        
-        self.db_thread = DBWorkerThread(self.db, do_create)
-        self.db_thread.start()
+    def _create_task_and_candidates(self, job_name, ai_config, download_dir, download_all, total):
+        """同步创建数据库任务并写入候选人记录，返回 task_id"""
+        try:
+            task = self.db.create_task(
+                job_name=job_name,
+                ai_config=ai_config if ai_config else {},
+                download_dir=download_dir,
+                download_all_pages=download_all,
+                total_candidates=total
+            )
+            self.current_task_id = task.id
+            self.db.update_task_status(task.id, 'running')
+            # 单页模式预写入选中候选人；分页模式由下载进程按页补充
+            if not download_all:
+                candidates = self.get_selected_candidates()
+                self.db.add_candidates_batch(task.id, [dict(c, page=1) for c in candidates])
+            self.db.add_task_log(task.id, 'info', f'开始下载 {total} 个候选人')
+            return task.id
+        except Exception as e:
+            self.log(f"创建任务失败: {e}")
+            print(f"创建任务失败: {e}")
+            return None
 
     def stop_download(self):
         """中断下载"""
@@ -509,14 +591,31 @@ class MainWindow(QMainWindow):
 
     def check_worker_status(self):
         """检查子进程状态"""
-        if not self.worker_process:
-            self.check_timer.stop()
-            self.set_buttons_enabled(True)
-            self.start_btn.setVisible(True)
-            self.stop_btn.setVisible(False)
-            return
+        try:
+            if not self.worker_process:
+                self.check_timer.stop()
+                self.set_buttons_enabled(True)
+                self.start_btn.setVisible(True)
+                self.stop_btn.setVisible(False)
+                return
 
-        if not self.worker_process.is_alive():
+            if self.worker_process.is_alive():
+                # 刷新任务看门狗：超过90秒无结果则终止，避免界面卡死
+                import time
+                if (self.current_task == 'refresh' and self.worker_start_time
+                        and time.time() - self.worker_start_time > 90):
+                    self.log("刷新超时，已终止该次获取，请重试")
+                    self.worker_process.terminate()
+                    self.worker_process.join(timeout=3)
+                    self.worker_process = None
+                    self.current_task = None
+                    self.worker_start_time = None
+                    self.check_timer.stop()
+                    self.set_buttons_enabled(True)
+                    self.start_btn.setVisible(True)
+                    self.stop_btn.setVisible(False)
+                return
+
             self.check_timer.stop()
             self.set_buttons_enabled(True)
             self.start_btn.setVisible(True)
@@ -534,10 +633,25 @@ class MainWindow(QMainWindow):
                 self.log("任务失败：无结果")
 
             self.current_task = None
+            self.worker_start_time = None
+        except Exception as e:
+            import traceback
+            self.log(f"检查任务状态异常: {e}")
+            traceback.print_exc()
+            self.current_task = None
+            self.worker_start_time = None
+            self.check_timer.stop()
+            self.set_buttons_enabled(True)
+            self.start_btn.setVisible(True)
+            self.stop_btn.setVisible(False)
 
     def _on_refresh_finished(self, result):
         """刷新完成回调"""
-        if result.get('success'):
+        try:
+            if not result.get('success'):
+                error = result.get('error', '未知错误')
+                self.log(f"获取失败: {error}")
+                return
             positions = result.get('positions', [])
             self.positions = positions
             active = result.get('active_position', '')
@@ -587,9 +701,10 @@ class MainWindow(QMainWindow):
                 
             # 检查是否有未完成的任务
             QTimer.singleShot(500, self.check_unfinished_tasks)
-        else:
-            error = result.get('error', '未知错误')
-            self.log(f"获取失败: {error}")
+        except Exception as e:
+            import traceback
+            self.log(f"处理刷新结果异常: {e}")
+            traceback.print_exc()
     
     def _async_sync_jobs(self, positions):
         """异步同步岗位到数据库"""
@@ -626,12 +741,81 @@ class MainWindow(QMainWindow):
     
     def resume_task(self, task):
         """恢复任务"""
-        self.log(f"恢复任务 #{task.id}: {task.job_name}")
-        self.log("任务恢复功能将在下一阶段完善")
+        try:
+            pending = self.db.get_pending_candidates(task.id)
+            if not pending:
+                self.log(f"任务 #{task.id} 没有待处理的候选人，标记为完成")
+                self.db.update_task_status(task.id, 'completed')
+                return
+
+            # 标记任务为运行中
+            self.db.update_task_status(task.id, 'running')
+            self.current_task_id = task.id
+
+            # 恢复下载配置
+            self.job_combo.setCurrentText(task.job_name)
+            download_dir = task.download_dir or str(_BASE_DIR / "output" / "resumes")
+            self.download_dir_edit.setText(download_dir)
+
+            # 从任务快照恢复 AI 配置
+            ai_config = None
+            if task.ai_enabled and task.ai_api_key:
+                ai_config = {
+                    "enabled": True,
+                    "api_key": task.ai_api_key,
+                    "match_description": task.ai_match_description,
+                    "job_descriptions": {},
+                }
+
+            # 从数据库恢复待处理候选人（含学校/专业/学历信息）
+            candidates = [
+                {
+                    "name": c.name,
+                    "school": c.school,
+                    "major": c.major,
+                    "education": c.education,
+                    "page": c.page_num,
+                }
+                for c in pending
+            ]
+
+            self.log(f"恢复任务 #{task.id}: {task.job_name}，待处理 {len(candidates)} 个候选人")
+            self.log("提示: 请确保浏览器停留在原任务中断时的页面")
+
+            # 重置中断信号
+            self.stop_event.clear()
+
+            self.start_btn.setVisible(False)
+            self.stop_btn.setVisible(True)
+            self.stop_btn.setEnabled(True)
+
+            self.set_buttons_enabled(False)
+            self.current_task = 'download'
+            import time
+            self.worker_start_time = time.time()
+
+            self.result_queue = multiprocessing.Queue()
+            self.worker_process = multiprocessing.Process(
+                target=download_worker_target,
+                args=(self.result_queue, candidates, download_dir, task.job_name,
+                      ai_config, False, self.stop_event, task.id),
+                daemon=True
+            )
+            self.worker_process.start()
+            self.check_timer.start(500)
+        except Exception as e:
+            import traceback
+            self.log(f"恢复任务失败: {e}")
+            traceback.print_exc()
 
     def _on_download_finished(self, result):
         """下载完成回调"""
-        if result.get('success'):
+        try:
+            if not result.get('success'):
+                error = result.get('error', '未知错误')
+                self.log(f"下载失败: {error}")
+                self._async_update_task_on_fail(error)
+                return
             results = result.get('results', [])
             success_count = sum(1 for r in results if r.get('success'))
             fail_count = len(results) - success_count
@@ -640,19 +824,20 @@ class MainWindow(QMainWindow):
             self.log(f"下载完成: 成功 {success_count} 个，失败 {fail_count} 个，共 {total_pages} 页")
 
             # 异步更新数据库任务状态
-            self._async_update_task_on_complete(results, success_count, fail_count, total_pages)
+            paused = self.stop_event.is_set()
+            self._async_update_task_on_complete(
+                results, success_count, fail_count, total_pages, paused=paused
+            )
 
             # 导出结果
             if results:
                 self.export_results(results)
-        else:
-            error = result.get('error', '未知错误')
-            self.log(f"下载失败: {error}")
-            
-            # 异步更新数据库任务状态为失败
-            self._async_update_task_on_fail(error)
+        except Exception as e:
+            import traceback
+            self.log(f"处理下载结果异常: {e}")
+            traceback.print_exc()
     
-    def _async_update_task_on_complete(self, results, success_count, fail_count, total_pages):
+    def _async_update_task_on_complete(self, results, success_count, fail_count, total_pages, paused=False):
         """异步更新任务完成状态"""
         task_id = self.current_task_id
         
@@ -667,9 +852,10 @@ class MainWindow(QMainWindow):
                     failed_count=fail_count,
                     total_pages=total_pages
                 )
-                self.db.update_task_status(task_id, 'completed')
+                status = 'paused' if paused else 'completed'
+                self.db.update_task_status(task_id, status)
                 self.db.add_task_log(task_id, 'info', 
-                    f'任务完成: 成功 {success_count}, 失败 {fail_count}')
+                    f'任务{"已暂停" if paused else "完成"}: 成功 {success_count}, 失败 {fail_count}')
             except Exception as e:
                 print(f"更新任务状态失败: {e}")
         
@@ -780,13 +966,22 @@ class MainWindow(QMainWindow):
                 checkbox.setChecked(False)
 
     def get_selected_candidates(self):
+        """返回选中的候选人（完整信息 dict，供下载与数据库持久化使用）"""
         selected = []
         for i in range(self.candidate_table.rowCount()):
             checkbox = self.candidate_table.cellWidget(i, 0)
             if checkbox and checkbox.isChecked():
-                name = self.candidate_table.item(i, 1)
-                if name:
-                    selected.append(name.text())
+                name_item = self.candidate_table.item(i, 1)
+                if not name_item:
+                    continue
+                name = name_item.text()
+                # 从 self.candidates 找回完整信息（学校/专业/学历）
+                found = None
+                for c in self.candidates:
+                    if c.get('name') == name:
+                        found = c
+                        break
+                selected.append(dict(found) if found else {'name': name})
         return selected
 
     def show_ai_config(self):

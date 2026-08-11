@@ -16,25 +16,88 @@ else:
 sys.path.insert(0, str(BASE_DIR))
 
 
-def run(candidate_names, download_dir, job_name='', ai_config=None, 
-        download_all_pages=False, stop_event=None):
+def run(candidates, download_dir, job_name='', ai_config=None, 
+        download_all_pages=False, stop_event=None, task_id=None, db_path=None):
     """
     执行下载操作
     
     Args:
-        candidate_names: 候选人姓名列表
+        candidates: 候选人列表，每个为dict（name/school/major/education）
         download_dir: 下载目录
         job_name: 职位名称
         ai_config: AI配置
         download_all_pages: 是否下载所有页
         stop_event: multiprocessing.Event，用于跨进程中断
+        task_id: 数据库任务ID，用于候选人状态实时持久化
+        db_path: 数据库文件路径（默认使用项目配置）
     """
     from playwright.sync_api import sync_playwright
     from config import CHROME_DEBUG_PORT
 
+    # 兼容旧调用：只传姓名列表
+    if candidates and isinstance(candidates[0], str):
+        candidates = [{'name': n} for n in candidates]
+
+    # 数据库持久化（候选人状态实时写入）
+    db = None
+    if task_id:
+        try:
+            from db import Database
+            db = Database(db_path) if db_path else Database()
+        except Exception:
+            db = None
+
     def is_stopped():
         """检查是否已停止"""
         return stop_event is not None and stop_event.is_set()
+
+    def persist_candidate(candidate, page_num, download_result):
+        """将候选人处理结果写入数据库"""
+        if not db or not task_id:
+            return
+        try:
+            from db.models import generate_candidate_external_id
+            name = candidate.get('name', '')
+            school = candidate.get('school', '') or ''
+            major = candidate.get('major', '') or ''
+            education = candidate.get('education', '') or ''
+            db.add_candidate(task_id, {
+                'name': name,
+                'school': school,
+                'major': major,
+                'education': education,
+                'page': page_num,
+            })
+            ext_id = generate_candidate_external_id(name, school, major)
+            if download_result.get('ai_pass') is not None:
+                db.update_candidate_ai_result(
+                    task_id, ext_id,
+                    ai_pass=bool(download_result.get('ai_pass')),
+                    ai_reason=download_result.get('ai_reason', '') or '',
+                )
+            if download_result.get('success'):
+                status = 'success'
+            elif download_result.get('ai_pass') is False:
+                status = 'skipped'
+            else:
+                status = 'failed'
+            db.update_candidate_download_status(
+                task_id, ext_id,
+                status=status,
+                file_path=download_result.get('file_path', '') or '',
+                error_message=download_result.get('error', '') or '',
+            )
+        except Exception:
+            pass
+
+    def update_task_progress(**stats):
+        """更新任务进度"""
+        if not db or not task_id:
+            return
+        try:
+            db.update_task_progress(task_id, **stats)
+        except Exception:
+            pass
 
     result = {
         'success': False,
@@ -53,7 +116,7 @@ def run(candidate_names, download_dir, job_name='', ai_config=None,
         sock.close()
 
         if not port_open:
-            result['error'] = f'调试端口 {CHROME_DEBUG_PORT} 未开放'
+            result['error'] = f'调试端口 {CHROME_DEBUG_PORT} 未开放，请确认 Chrome 调试模式已启动'
             return result
 
         # 连接浏览器
@@ -83,13 +146,41 @@ def run(candidate_names, download_dir, job_name='', ai_config=None,
         all_results = []
         page_num = 1
         global_index = 0
+        processed_count = 0
+        success_count = 0
+        failed_count = 0
+        ai_pass_count = 0
+        ai_fail_count = 0
+
+        def record(candidate, page_no, download_result):
+            """统计并持久化单个候选人的处理结果"""
+            nonlocal processed_count, success_count, failed_count, ai_pass_count, ai_fail_count
+            processed_count += 1
+            if download_result.get('success'):
+                success_count += 1
+            else:
+                failed_count += 1
+            if download_result.get('ai_pass') is True:
+                ai_pass_count += 1
+            elif download_result.get('ai_pass') is False:
+                ai_fail_count += 1
+            persist_candidate(candidate, page_no, download_result)
+            update_task_progress(
+                processed_count=processed_count,
+                success_count=success_count,
+                failed_count=failed_count,
+                ai_pass_count=ai_pass_count,
+                ai_fail_count=ai_fail_count,
+                current_page=page_num,
+                total_pages=page_num,
+            )
 
         if download_all_pages:
             # 分页下载模式
             while not is_stopped():
-                # 收集当前页候选人
-                current_names = collect_all_candidates_with_scroll(page)
-                if not current_names:
+                # 收集当前页候选人（含学校/专业/学历信息）
+                current_candidates = collect_all_candidates_with_scroll(page)
+                if not current_candidates:
                     break
 
                 # 滚动回顶部
@@ -97,16 +188,18 @@ def run(candidate_names, download_dir, job_name='', ai_config=None,
                 time.sleep(1)
 
                 # 逐个下载当前页
-                for name in current_names:
+                for cand in current_candidates:
                     if is_stopped():
                         break
 
                     global_index += 1
+                    name = cand.get('name', '')
                     download_result = download_single_resume(
                         context, page, name, download_path, global_index, ai_config, job_name
                     )
                     download_result['page'] = page_num
                     all_results.append(download_result)
+                    record(cand, page_num, download_result)
                     time.sleep(1)
 
                 if is_stopped():
@@ -126,15 +219,20 @@ def run(candidate_names, download_dir, job_name='', ai_config=None,
                 page_num += 1
         else:
             # 单页下载模式（只下载选中的候选人）
-            for i, name in enumerate(candidate_names, 1):
+            for i, cand in enumerate(candidates, 1):
                 if is_stopped():
                     break
+
+                name = cand.get('name', '')
+                if not name:
+                    continue
 
                 download_result = download_single_resume(
                     context, page, name, download_path, i, ai_config, job_name
                 )
                 download_result['page'] = 1
                 all_results.append(download_result)
+                record(cand, 1, download_result)
                 time.sleep(1)
 
         result['results'] = all_results
@@ -151,8 +249,8 @@ def run(candidate_names, download_dir, job_name='', ai_config=None,
 
 
 def collect_all_candidates_with_scroll(page):
-    """滚动获取当前页所有候选人"""
-    all_names = []
+    """滚动获取当前页所有候选人（含学校/专业/学历信息）"""
+    all_candidates = []
     seen = set()
     no_new_count = 0
 
@@ -166,26 +264,60 @@ def collect_all_candidates_with_scroll(page):
         try:
             current = page.evaluate('''() => {
                 const items = document.querySelectorAll('.item.virtual_list');
-                const names = [];
+                const candidates = [];
                 items.forEach(item => {
-                    const nameEl = item.querySelector('.detail .firstline .name') || item.querySelector('.name');
+                    let name = '';
+                    let school = '';
+                    let major = '';
+                    let education = '';
+
+                    const nameEl = item.querySelector('.detail .firstline .name')
+                        || item.querySelector('.name');
                     if (nameEl) {
-                        const name = nameEl.textContent.trim();
-                        if (name && name.length > 0 && name.length < 20 && name !== ' ') {
-                            names.push(name);
-                        }
+                        name = nameEl.textContent.trim();
+                    }
+
+                    const schoolEl = item.querySelector('.school_name');
+                    if (schoolEl) {
+                        school = schoolEl.textContent.trim();
+                    }
+
+                    const majorEl = item.querySelector('.major_name');
+                    if (majorEl) {
+                        major = majorEl.textContent.trim();
+                    }
+
+                    const detailEl = item.querySelector('.name.context-detail');
+                    if (detailEl) {
+                        const spans = detailEl.querySelectorAll('span[title]');
+                        spans.forEach(span => {
+                            const title = span.getAttribute('title');
+                            if (title && (title === '本科' || title === '硕士' || title === '博士' || title === '大专' || title === '专科')) {
+                                education = title;
+                            }
+                        });
+                    }
+
+                    if (name && name.length > 0 && name.length < 20 && name !== ' ') {
+                        candidates.push({
+                            name: name,
+                            school: school,
+                            major: major,
+                            education: education
+                        });
                     }
                 });
-                return names;
+                return candidates;
             }''')
         except Exception:
             break
 
         new_count = 0
-        for name in current:
+        for candidate in current:
+            name = candidate['name']
             if name not in seen:
                 seen.add(name)
-                all_names.append(name)
+                all_candidates.append(candidate)
                 new_count += 1
 
         if new_count > 0:
@@ -202,7 +334,7 @@ def collect_all_candidates_with_scroll(page):
         except Exception:
             break
 
-    return all_names
+    return all_candidates
 
 
 def scroll_to_pagination(page):
@@ -358,6 +490,7 @@ def download_single_resume(context, page, candidate_name, download_dir, index, a
                         ai_config.get("api_key", "")
                     )
                     result["ai_pass"] = eval_result.get("match", True)
+                    result["ai_reason"] = eval_result.get("reason", "")
                     if not eval_result.get("match", True):
                         result["error"] = f"AI不通过: {eval_result.get('reason', '')}"
                         attach_page.close()
@@ -414,6 +547,7 @@ def download_single_resume(context, page, candidate_name, download_dir, index, a
                         ai_config.get("api_key", "")
                     )
                     result["ai_pass"] = eval_result.get("match", True)
+                    result["ai_reason"] = eval_result.get("reason", "")
                     if not eval_result.get("match", True):
                         result["error"] = f"AI不通过: {eval_result.get('reason', '')}"
                         detail_page.close()

@@ -46,6 +46,7 @@ class Database:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=10000")
         return conn
     
     def _init_db(self):
@@ -267,30 +268,29 @@ class Database:
             ))
             
             task_id = cursor.lastrowid
-            
-            # 记录日志
-            self.add_task_log(task_id, 'info', f'任务创建: {job_name}')
-            if ai_enabled:
-                self.add_task_log(task_id, 'info', f'AI筛选已启用')
-            
             conn.commit()
-            
-            return Task(
-                id=task_id,
-                job_id=job_id,
-                job_name=job_name,
-                status='pending',
-                ai_enabled=ai_enabled,
-                ai_api_key=ai_api_key,
-                ai_match_description=ai_match_desc,
-                download_dir=download_dir,
-                download_all_pages=download_all_pages,
-                total_candidates=total_candidates,
-                created_at=now,
-                updated_at=now
-            )
         finally:
             conn.close()
+
+        # 日志使用独立连接写入，避免嵌套事务导致数据库锁
+        self.add_task_log(task_id, 'info', f'任务创建: {job_name}')
+        if ai_enabled:
+            self.add_task_log(task_id, 'info', f'AI筛选已启用')
+
+        return Task(
+            id=task_id,
+            job_id=job_id,
+            job_name=job_name,
+            status='pending',
+            ai_enabled=ai_enabled,
+            ai_api_key=ai_api_key,
+            ai_match_description=ai_match_desc,
+            download_dir=download_dir,
+            download_all_pages=download_all_pages,
+            total_candidates=total_candidates,
+            created_at=now,
+            updated_at=now
+        )
     
     def get_task(self, task_id: int) -> Optional[Task]:
         """获取任务"""
