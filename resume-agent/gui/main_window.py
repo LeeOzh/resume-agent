@@ -1821,9 +1821,11 @@ class AIConfigDialog(QDialog):
         """添加一行：岗位名 + 描述（用真实 QLineEdit，文本始终可见）"""
         row = self.desc_table.rowCount()
         self.desc_table.insertRow(row)
-        name_edit = FluentLineEdit(name)
+        name_edit = FluentLineEdit()
+        name_edit.setText(name)
         name_edit.setPlaceholderText("岗位名称，如：前端开发工程师")
-        desc_edit = FluentLineEdit(desc)
+        desc_edit = FluentLineEdit()
+        desc_edit.setText(desc)
         desc_edit.setPlaceholderText("输入匹配描述，如：2年react, 4年经验, 本科以上")
         self.desc_table.setCellWidget(row, 0, name_edit)
         self.desc_table.setCellWidget(row, 1, desc_edit)
