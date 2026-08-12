@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QDialog, QMessageBox, QProgressBar, QApplication,
     QFileDialog, QComboBox, QFrame, QScrollArea
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QEvent, QPropertyAnimation, QPoint
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QPropertyAnimation
 from PyQt6.QtGui import QAction, QFont, QColor, QIcon, QShortcut, QKeySequence
 
 # 获取基础目录
@@ -126,11 +126,8 @@ class MainWindow(QMainWindow):
         self.pause_event = multiprocessing.Event()
 
         self.setWindowTitle("AI 简历批量初筛与下载助手")
-        self.setMinimumSize(960, 620)
-
-        # 无边框窗口（圆角卡片 + 纯色背景；不使用 WA_TranslucentBackground，
-        # 避免部分机器上透明区域渲染为黑色/不可点击）
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
+        # 原生窗口边框：自由缩放由系统支持；这里只保留一个合理下限避免布局崩坏
+        self.setMinimumSize(800, 560)
         self.theme = 'light'
 
         self.apply_theme('light')
@@ -256,16 +253,12 @@ class MainWindow(QMainWindow):
         self._root_layout.setContentsMargins(0, 0, 0, 0)
         self.setCentralWidget(root_widget)
 
-        # 容器：标题栏 + 菜单 + 工具栏 + 内容 + 状态栏
-        from gui.widgets.title_bar import TitleBar
+        # 容器：菜单 + 工具栏 + 内容 + 状态栏（使用原生窗口边框）
         self.window_container = QFrame()
         self.window_container.setObjectName("windowContainer")
         self._container_layout = QVBoxLayout(self.window_container)
         self._container_layout.setContentsMargins(0, 0, 0, 0)
         self._container_layout.setSpacing(0)
-
-        self.title_bar = TitleBar(self.window_container)
-        self._container_layout.addWidget(self.title_bar)
 
         central_widget = QWidget()
         self._container_layout.addWidget(central_widget, 1)
@@ -450,7 +443,7 @@ class MainWindow(QMainWindow):
         # 菜单栏放入容器内（无边框窗口不使用 QMainWindow 原生菜单栏）
         menubar = QMenuBar(self.window_container)
         menubar.setObjectName("appMenuBar")
-        self._container_layout.insertWidget(1, menubar)
+        self._container_layout.insertWidget(0, menubar)
 
         file_menu = menubar.addMenu("文件")
         exit_action = QAction("退出", self)
@@ -482,7 +475,7 @@ class MainWindow(QMainWindow):
 
     def setup_toolbar(self):
         toolbar = QToolBar("工具栏", self.window_container)
-        self._container_layout.insertWidget(2, toolbar)
+        self._container_layout.insertWidget(1, toolbar)
 
         self.toolbar_refresh_btn = QPushButton("刷新列表")
         self.toolbar_refresh_btn.setIcon(self._icon("refresh"))
@@ -550,85 +543,6 @@ class MainWindow(QMainWindow):
             self.match_desc_combo.blockSignals(False)
         except Exception:
             pass
-
-    # ==================== 无边框窗口 ====================
-
-    def _update_window_chrome(self):
-        """窗口状态变化处理（无外阴影/边距；仅同步容器状态与图标）"""
-        maximized = self.isMaximized()
-        self.window_container.setProperty("maximized", "true" if maximized else "false")
-        style = self.window_container.style()
-        style.unpolish(self.window_container)
-        style.polish(self.window_container)
-
-    def changeEvent(self, event):
-        super().changeEvent(event)
-        if event.type() == QEvent.Type.WindowStateChange:
-            maximized = self.isMaximized()
-            try:
-                self.title_bar.on_window_state_changed(self.windowState())
-            except Exception:
-                pass
-            self._update_window_chrome()
-            if maximized:
-                screen = self.screen()
-                if screen:
-                    self.setGeometry(screen.availableGeometry())
-
-    def nativeEvent(self, eventType, message):
-        """
-        Windows 无边框窗口边缘缩放支持（WM_NCHITTEST）。
-
-        注意：PyQt6 6.11 在此系统上，覆写 nativeEvent 后再调用
-        super().nativeEvent() 会触发 QtCore.pyd 访问违例（闪退）。
-        因此本方法一律不调用 super，未处理的 Windows 消息统一返回
-        (False, 0)，交给 Qt 默认处理。
-        """
-        try:
-            if eventType == b"windows_generic_MSG" and not self.isMaximized() and not self.isFullScreen():
-                import ctypes
-                msg = ctypes.wintypes.MSG.from_address(int(message))
-                if msg.message == 0x0084:  # WM_NCHITTEST
-                    x = ctypes.c_short(msg.lParam & 0xFFFF).value
-                    y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
-
-                    # 边缘缩放优先（窗口边缘 8px 内可拖拽调整大小）
-                    g = self.geometry()
-                    border = 8
-                    left = x <= g.left() + border
-                    right = x >= g.right() - border
-                    top = y <= g.top() + border
-                    bottom = y >= g.bottom() - border
-                    if left and top:
-                        return True, 13   # HTTOPLEFT
-                    if right and top:
-                        return True, 14   # HTTOPRIGHT
-                    if left and bottom:
-                        return True, 16   # HTBOTTOMLEFT
-                    if right and bottom:
-                        return True, 17   # HTBOTTOMRIGHT
-                    if left:
-                        return True, 10   # HTLEFT
-                    if right:
-                        return True, 11   # HTRIGHT
-                    if top:
-                        return True, 12   # HTTOP
-                    if bottom:
-                        return True, 15   # HTBOTTOM
-
-                    # 标题栏区域：返回 HTCAPTION 交给系统原生拖动（按钮区域除外）
-                    local = self.mapFromGlobal(QPoint(x, y))
-                    tb = getattr(self, 'title_bar', None)
-                    if tb is not None and local.y() > border and tb.geometry().contains(local):
-                        tb_local = tb.mapFromGlobal(QPoint(x, y))
-                        under = tb.childAt(tb_local)
-                        if under not in (getattr(tb, 'min_btn', None),
-                                         getattr(tb, 'max_btn', None),
-                                         getattr(tb, 'close_btn', None)):
-                            return True, 2   # HTCAPTION
-            return False, 0
-        except Exception:
-            return False, 0
 
     def browse_school_list(self):
         """浏览选择学校名单文件"""

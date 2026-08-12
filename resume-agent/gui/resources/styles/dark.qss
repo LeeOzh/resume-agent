@@ -539,6 +539,16 @@ QSplitter::handle:hover {
     background-color: #334155;
 }
 
+/* 滚动区域：视口透明跟随容器背景（避免缝隙透出系统暗色） */
+QScrollArea {
+    background-color: transparent;
+    border: none;
+}
+
+QScrollArea > QWidget > QWidget {
+    background-color: transparent;
+}
+
 QToolTip {
     background-color: #1E293B;
     border: 1px solid #475569;
