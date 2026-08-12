@@ -941,13 +941,11 @@ def read_resume_text(page):
 
 def evaluate_resume(resume_text, match_description, api_key):
     """调用AI评估简历"""
-    try:
-        from openai import OpenAI
-        from config import MIMO_API_BASE, MIMO_MODEL
+    from openai import OpenAI
+    from config import MIMO_API_BASE, MIMO_MODEL
 
-        client = OpenAI(api_key=api_key, base_url=MIMO_API_BASE)
-
-        prompt = f"""你是一个专业的简历筛选助手。请根据以下岗位要求，判断候选人简历是否符合要求。
+    client = OpenAI(api_key=api_key, base_url=MIMO_API_BASE)
+    prompt = f"""你是一个专业的简历筛选助手。请根据以下岗位要求，判断候选人简历是否符合要求。
 
 【岗位要求】
 {match_description}
@@ -958,22 +956,34 @@ def evaluate_resume(resume_text, match_description, api_key):
 请严格按以下 JSON 格式回复，不要输出其他内容：
 {{"match": true/false, "reason": "简要说明原因（30字以内）"}}"""
 
-        completion = client.chat.completions.create(
-            model=MIMO_MODEL,
-            messages=[
-                {"role": "system", "content": "你是简历筛选助手，只输出JSON格式结果。"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.1,
-            max_tokens=100,
-        )
+    last_error = ""
+    # MiMo 是推理模型：推理过程会消耗 token，max_tokens 太小会导致最终答案为空，
+    # 这里加大额度并失败重试一次（推理 800 -> 2000）
+    for attempt, max_tokens in enumerate([800, 2000]):
+        try:
+            completion = client.chat.completions.create(
+                model=MIMO_MODEL,
+                messages=[
+                    {"role": "system", "content": "你是简历筛选助手，只输出JSON格式结果。"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=max_tokens,
+            )
 
-        content = completion.choices[0].message.content.strip()
-        if content.startswith("```"):
-            content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            content = (completion.choices[0].message.content or "").strip()
+            if not content:
+                last_error = "模型未返回内容（推理过长）"
+                continue
+            if content.startswith("```"):
+                content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
-        import json
-        result = json.loads(content)
-        return {"match": bool(result.get("match", False)), "reason": str(result.get("reason", ""))}
-    except Exception as e:
-        return {"match": True, "reason": f"AI评估失败，默认通过"}
+            import json
+            result = json.loads(content)
+            return {"match": bool(result.get("match", False)),
+                    "reason": str(result.get("reason", ""))}
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    return {"match": True, "reason": f"AI评估失败({last_error})，默认通过"}

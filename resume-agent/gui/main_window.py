@@ -1492,6 +1492,7 @@ class MainWindow(QMainWindow):
                     "页码": r.get('page', ''),
                     "下载状态": status,
                     "AI评估": "通过" if r.get('ai_pass') is True else ("不通过" if r.get('ai_pass') is False else "未评估"),
+                    "AI理由": r.get('ai_reason', ''),
                     "文件路径": r.get('file_path', ''),
                     "错误/原因": r.get('error', ''),
                 })
