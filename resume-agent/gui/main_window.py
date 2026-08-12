@@ -370,6 +370,11 @@ class MainWindow(QMainWindow):
         self.ai_enabled_label = QLabel("未配置")
         control_layout.addWidget(self.ai_enabled_label, 2, 1)
 
+        control_layout.addWidget(QLabel("匹配描述:"), 3, 0)
+        self.match_desc_combo = QComboBox()
+        self.match_desc_combo.setToolTip("选择本次下载使用的岗位匹配描述（默认自动匹配当前岗位）")
+        control_layout.addWidget(self.match_desc_combo, 3, 1)
+
         # 下载按钮布局
         btn_layout = QHBoxLayout()
         self.start_btn = QPushButton("开始下载")
@@ -405,7 +410,7 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.download_all_check)
         btn_layout.addStretch()
 
-        control_layout.addLayout(btn_layout, 3, 0, 1, 2)
+        control_layout.addLayout(btn_layout, 4, 0, 1, 2)
 
         control_group.setLayout(control_layout)
         right_layout.addWidget(control_group)
@@ -511,6 +516,7 @@ class MainWindow(QMainWindow):
         config = load_ai_config()
         has_key = bool(config.get("api_key"))
         enabled = bool(config.get("enabled")) and has_key
+        self._refresh_match_desc_combo()
         if enabled:
             self.ai_enabled_label.setText("已启用")
             self.ai_enabled_label.setStyleSheet("color: #16A34A;")
@@ -522,6 +528,25 @@ class MainWindow(QMainWindow):
             self.ai_enabled_label.setStyleSheet("color: #94A3B8;")
             self.ai_status_label.setText(f'<span style="color:#94A3B8">●</span> AI: {reason}')
             self.ai_status_label.setStyleSheet("color: gray;")
+
+    def _refresh_match_desc_combo(self):
+        """刷新下载控制区的匹配描述下拉框（自动/不使用/各岗位描述）"""
+        try:
+            self.match_desc_combo.blockSignals(True)
+            self.match_desc_combo.clear()
+            self.match_desc_combo.addItem("自动匹配当前岗位", "__auto__")
+            self.match_desc_combo.addItem("不使用AI筛选", "")
+            config = load_ai_config()
+            for name, desc in (config.get("job_descriptions", {}) or {}).items():
+                if not name or not desc:
+                    continue
+                label = f"{name}：{desc[:24]}{'…' if len(desc) > 24 else ''}"
+                self.match_desc_combo.addItem(label, desc)
+            idx = self.match_desc_combo.findData("__auto__")
+            self.match_desc_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.match_desc_combo.blockSignals(False)
+        except Exception:
+            pass
 
     # ==================== 无边框窗口 ====================
 
@@ -766,20 +791,28 @@ class MainWindow(QMainWindow):
         ai_config = load_ai_config()
         download_all = self.download_all_check.isChecked()
 
-        if ai_config.get("enabled") and ai_config.get("api_key"):
-            # 按当前职位查找匹配描述（job_descriptions -> match_description）
+        # 匹配描述：由用户从下拉框选择执行哪一个（默认自动匹配当前岗位）
+        sel = self.match_desc_combo.currentData() if hasattr(self, 'match_desc_combo') else '__auto__'
+        if sel == "":
+            ai_config = None
+            self.log("本次下载不使用 AI 筛选（已在下拉框选择）")
+        elif ai_config.get("enabled") and ai_config.get("api_key"):
             job_descs = ai_config.get("job_descriptions", {})
-            match_desc = job_descs.get(job_name, '')
-            if not match_desc:
-                # 兼容部分名称：配置 key 是岗位名子串或包含岗位名时也命中
-                for key, desc in job_descs.items():
-                    if key and desc and (key in job_name or job_name in key):
-                        match_desc = desc
-                        self.log(f"AI 匹配描述使用「{key}」的配置")
-                        break
+            if sel == "__auto__":
+                # 按当前职位查找匹配描述（精确 + 模糊）
+                match_desc = job_descs.get(job_name, '')
+                if not match_desc:
+                    for key, desc in job_descs.items():
+                        if key and desc and (key in job_name or job_name in key):
+                            match_desc = desc
+                            self.log(f"AI 匹配描述使用「{key}」的配置")
+                            break
+                if not match_desc:
+                    self.log(f"警告: 当前职位「{job_name}」未配置匹配描述，AI 将按空描述评估（可在 设置→AI配置 中添加）")
+            else:
+                match_desc = sel
+                self.log("AI 匹配描述：使用手动选择项")
             ai_config["match_description"] = match_desc
-            if not match_desc:
-                self.log(f"警告: 当前职位「{job_name}」未配置匹配描述，AI 将按空描述评估（可在 设置→AI配置 中添加）")
         else:
             ai_config = None
 
@@ -1774,7 +1807,7 @@ class AIConfigDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("AI简历筛选配置")
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(640)
         self.config = load_ai_config()
         self.setup_ui()
         self.load_config()
@@ -1788,11 +1821,19 @@ class AIConfigDialog(QDialog):
         api_layout.addWidget(QLabel("API Key:"), 0, 0)
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        api_layout.addWidget(self.api_key_edit, 0, 1)
+        self.api_key_edit.setPlaceholderText("输入 MiMo API Key")
+        api_layout.addWidget(self.api_key_edit, 0, 1, 1, 2)
 
-        api_layout.addWidget(QLabel("启用AI筛选:"), 1, 0)
+        self.test_btn = QPushButton("测试连接")
+        self.test_btn.clicked.connect(self.test_connection)
+        api_layout.addWidget(self.test_btn, 1, 1)
+        self.test_result_label = QLabel("")
+        self.test_result_label.setWordWrap(True)
+        api_layout.addWidget(self.test_result_label, 1, 2)
+
+        api_layout.addWidget(QLabel("启用AI筛选:"), 2, 0)
         self.enabled_check = QCheckBox()
-        api_layout.addWidget(self.enabled_check, 1, 1)
+        api_layout.addWidget(self.enabled_check, 2, 1)
 
         api_group.setLayout(api_layout)
         layout.addWidget(api_group)
@@ -1804,25 +1845,48 @@ class AIConfigDialog(QDialog):
         self.desc_table.setColumnCount(2)
         self.desc_table.setHorizontalHeaderLabels(["岗位名称", "匹配描述"])
         self.desc_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.desc_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         desc_layout.addWidget(self.desc_table)
 
         btn_layout = QHBoxLayout()
         self.add_btn = QPushButton("添加")
         self.add_btn.clicked.connect(self.add_description)
-        self.remove_btn = QPushButton("删除")
+        self.remove_btn = QPushButton("删除选中")
         self.remove_btn.clicked.connect(self.remove_description)
         btn_layout.addWidget(self.add_btn)
         btn_layout.addWidget(self.remove_btn)
+        btn_layout.addStretch()
         desc_layout.addLayout(btn_layout)
 
         desc_group.setLayout(desc_layout)
         layout.addWidget(desc_group)
+
+        # AI 描述生成器
+        gen_group = QGroupBox("AI 生成专业匹配描述")
+        gen_layout = QVBoxLayout()
+        gen_layout.addWidget(QLabel(
+            "输入原始要求（用逗号分隔），点击生成后自动填入选中行的描述："
+        ))
+        self.gen_input = QLineEdit()
+        self.gen_input.setPlaceholderText("例如：2年react, 4年经验, 本科以上, 有全栈经验")
+        gen_layout.addWidget(self.gen_input)
+        gen_btn_row = QHBoxLayout()
+        self.gen_btn = QPushButton("生成专业描述")
+        self.gen_btn.clicked.connect(self.generate_description)
+        self.gen_result_label = QLabel("")
+        self.gen_result_label.setWordWrap(True)
+        gen_btn_row.addWidget(self.gen_btn)
+        gen_btn_row.addWidget(self.gen_result_label, 1)
+        gen_layout.addLayout(gen_btn_row)
+        gen_group.setLayout(gen_layout)
+        layout.addWidget(gen_group)
 
         button_layout = QHBoxLayout()
         self.ok_btn = QPushButton("确定")
         self.ok_btn.clicked.connect(self.accept)
         self.cancel_btn = QPushButton("取消")
         self.cancel_btn.clicked.connect(self.reject)
+        button_layout.addStretch()
         button_layout.addWidget(self.ok_btn)
         button_layout.addWidget(self.cancel_btn)
         layout.addLayout(button_layout)
@@ -1831,33 +1895,133 @@ class AIConfigDialog(QDialog):
         self.api_key_edit.setText(self.config.get("api_key", ""))
         self.enabled_check.setChecked(self.config.get("enabled", False))
         job_descs = self.config.get("job_descriptions", {})
-        self.desc_table.setRowCount(len(job_descs))
+        self.desc_table.setRowCount(0)
         for i, (name, desc) in enumerate(job_descs.items()):
-            self.desc_table.setItem(i, 0, QTableWidgetItem(name))
-            self.desc_table.setItem(i, 1, QTableWidgetItem(desc))
+            self._add_row(name, desc)
+        if self.desc_table.rowCount() == 0:
+            self._add_row("", "")
+
+    def _add_row(self, name="", desc=""):
+        """添加一行：岗位名 + 描述（用真实 QLineEdit，文本始终可见）"""
+        row = self.desc_table.rowCount()
+        self.desc_table.insertRow(row)
+        name_edit = QLineEdit(name)
+        name_edit.setPlaceholderText("岗位名称，如：前端开发工程师")
+        desc_edit = QLineEdit(desc)
+        desc_edit.setPlaceholderText("输入匹配描述，如：2年react, 4年经验, 本科以上")
+        self.desc_table.setCellWidget(row, 0, name_edit)
+        self.desc_table.setCellWidget(row, 1, desc_edit)
+        return row
 
     def save_config(self):
         self.config["api_key"] = self.api_key_edit.text()
         self.config["enabled"] = self.enabled_check.isChecked()
         job_descs = {}
         for i in range(self.desc_table.rowCount()):
-            name = self.desc_table.item(i, 0)
-            desc = self.desc_table.item(i, 1)
+            name_w = self.desc_table.cellWidget(i, 0)
+            desc_w = self.desc_table.cellWidget(i, 1)
+            if not name_w or not desc_w:
+                continue
+            name = name_w.text().strip()
+            desc = desc_w.text().strip()
             if name and desc:
-                job_descs[name.text()] = desc.text()
+                job_descs[name] = desc
         self.config["job_descriptions"] = job_descs
         save_ai_config(self.config)
 
     def add_description(self):
-        row = self.desc_table.rowCount()
-        self.desc_table.insertRow(row)
-        self.desc_table.setItem(row, 0, QTableWidgetItem("新岗位"))
-        self.desc_table.setItem(row, 1, QTableWidgetItem("请输入匹配描述"))
+        row = self._add_row()
+        self.desc_table.selectRow(row)
+        self.desc_table.scrollToBottom()
 
     def remove_description(self):
         current_row = self.desc_table.currentRow()
         if current_row >= 0:
             self.desc_table.removeRow(current_row)
+
+    def _call_llm(self, api_key, messages, max_tokens=50, temperature=0.1):
+        """调用 MiMo API（测试连接/生成描述共用）"""
+        from openai import OpenAI
+        from config import MIMO_API_BASE, MIMO_MODEL
+        client = OpenAI(api_key=api_key, base_url=MIMO_API_BASE)
+        completion = client.chat.completions.create(
+            model=MIMO_MODEL,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return (completion.choices[0].message.content or "").strip()
+
+    def test_connection(self):
+        """测试 API Key 是否可用"""
+        api_key = self.api_key_edit.text().strip()
+        if not api_key:
+            self.test_result_label.setText("请先输入 API Key")
+            self.test_result_label.setStyleSheet("color: #D97706;")
+            return
+        self.test_btn.setEnabled(False)
+        self.test_result_label.setText("测试中...")
+        self.test_result_label.setStyleSheet("color: #2563EB;")
+        try:
+            text = self._call_llm(
+                api_key,
+                [{"role": "user", "content": "只回复两个字：正常"}],
+                max_tokens=10,
+                temperature=0,
+            )
+            self.test_result_label.setText(f"连接成功 ✓（{text[:20]}）")
+            self.test_result_label.setStyleSheet("color: #16A34A;")
+        except Exception as e:
+            self.test_result_label.setText(f"连接失败: {e}")
+            self.test_result_label.setStyleSheet("color: #DC2626;")
+        finally:
+            self.test_btn.setEnabled(True)
+
+    def generate_description(self):
+        """根据原始要求调用 AI 生成专业匹配描述，填入选中行"""
+        raw = self.gen_input.text().strip()
+        api_key = self.api_key_edit.text().strip()
+        row = self.desc_table.currentRow()
+        if not raw:
+            self.gen_result_label.setText("请先输入原始要求")
+            self.gen_result_label.setStyleSheet("color: #D97706;")
+            return
+        if not api_key:
+            self.gen_result_label.setText("请先输入 API Key")
+            self.gen_result_label.setStyleSheet("color: #D97706;")
+            return
+        if row < 0:
+            self.gen_result_label.setText("请先在列表选择/添加一行")
+            self.gen_result_label.setStyleSheet("color: #D97706;")
+            return
+        self.gen_btn.setEnabled(False)
+        self.gen_result_label.setText("生成中...")
+        self.gen_result_label.setStyleSheet("color: #2563EB;")
+        try:
+            prompt = (
+                "你是资深招聘HR。请根据以下原始岗位要求，生成一段专业、结构清晰、便于AI筛选简历的岗位匹配描述。"
+                "覆盖工作年限、技能栈、学历、核心能力等，用中文简洁分点表达，"
+                "直接输出描述内容，不要多余解释。\n\n原始要求：\n" + raw
+            )
+            text = self._call_llm(
+                api_key,
+                [
+                    {"role": "system", "content": "你是简历筛选专家，只输出岗位匹配描述本身。"},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=400,
+                temperature=0.3,
+            )
+            desc_w = self.desc_table.cellWidget(row, 1)
+            if desc_w:
+                desc_w.setText(text)
+            self.gen_result_label.setText("已生成并填入选中行 ✓")
+            self.gen_result_label.setStyleSheet("color: #16A34A;")
+        except Exception as e:
+            self.gen_result_label.setText(f"生成失败: {e}")
+            self.gen_result_label.setStyleSheet("color: #DC2626;")
+        finally:
+            self.gen_btn.setEnabled(True)
 
     def accept(self):
         self.save_config()
