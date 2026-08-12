@@ -18,6 +18,11 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QPropertyAnimation
 from PyQt6.QtGui import QAction, QFont, QColor, QIcon, QShortcut, QKeySequence
+from qfluentwidgets import (
+    FluentIcon, PrimaryPushButton, PushButton, ComboBox, TableWidget,
+    CheckBox as FluentCheckBox, LineEdit as FluentLineEdit,
+    setTheme, Theme, setThemeColor,
+)
 
 # 获取基础目录
 if getattr(sys, 'frozen', False):
@@ -167,6 +172,12 @@ class MainWindow(QMainWindow):
         """应用主题样式（light / dark）"""
         self.theme = theme
         try:
+            # Fluent 组件主题（qfluentwidgets）
+            setTheme(Theme.DARK if theme == 'dark' else Theme.LIGHT)
+            setThemeColor("#2563EB")
+        except Exception:
+            pass
+        try:
             # 亮色主题文件名为 default.qss
             style_name = 'default.qss' if theme == 'light' else f'{theme}.qss'
             style_path = _resource_dir() / "gui" / "resources" / "styles" / style_name
@@ -276,9 +287,9 @@ class MainWindow(QMainWindow):
 
         # 表格工具栏
         table_toolbar = QHBoxLayout()
-        self.select_all_btn = QPushButton("全选")
+        self.select_all_btn = PushButton("全选")
         self.select_all_btn.clicked.connect(self.select_all_candidates)
-        self.deselect_all_btn = QPushButton("取消全选")
+        self.deselect_all_btn = PushButton("取消全选")
         self.deselect_all_btn.clicked.connect(self.deselect_all_candidates)
 
         table_toolbar.addWidget(self.select_all_btn)
@@ -286,7 +297,7 @@ class MainWindow(QMainWindow):
         table_toolbar.addStretch()
         left_layout.addLayout(table_toolbar)
 
-        self.candidate_table = QTableWidget()
+        self.candidate_table = TableWidget()
         self.candidate_table.setColumnCount(6)
         self.candidate_table.setHorizontalHeaderLabels(["选择", "姓名", "学校", "专业", "学历", "处理记录"])
         self.candidate_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -317,7 +328,7 @@ class MainWindow(QMainWindow):
         job_layout = QHBoxLayout()
 
         job_layout.addWidget(QLabel("当前职位:"))
-        self.job_combo = QComboBox()
+        self.job_combo = ComboBox()
         self.job_combo.setMinimumWidth(200)
         self.job_combo.currentTextChanged.connect(self.on_job_changed)
         job_layout.addWidget(self.job_combo)
@@ -331,11 +342,11 @@ class MainWindow(QMainWindow):
         school_layout = QVBoxLayout()
 
         school_btn_layout = QHBoxLayout()
-        self.load_school_btn = QPushButton("载入学校名单")
+        self.load_school_btn = PushButton("载入学校名单")
         self.load_school_btn.clicked.connect(self.browse_school_list)
         school_btn_layout.addWidget(self.load_school_btn)
 
-        self.school_filter_check = QCheckBox("启用筛选（只显示名单内学校）")
+        self.school_filter_check = FluentCheckBox("启用筛选（只显示名单内学校）")
         self.school_filter_check.setChecked(False)
         self.school_filter_check.stateChanged.connect(self.toggle_school_filter)
         school_btn_layout.addWidget(self.school_filter_check)
@@ -354,7 +365,7 @@ class MainWindow(QMainWindow):
         control_layout = QGridLayout()
 
         control_layout.addWidget(QLabel("保存目录:"), 0, 0)
-        self.download_dir_edit = QLineEdit()
+        self.download_dir_edit = FluentLineEdit()
         self.download_dir_edit.setText(str(_BASE_DIR / "output" / "resumes"))
         control_layout.addWidget(self.download_dir_edit, 0, 1)
 
@@ -367,36 +378,36 @@ class MainWindow(QMainWindow):
         control_layout.addWidget(self.ai_enabled_label, 2, 1)
 
         control_layout.addWidget(QLabel("匹配描述:"), 3, 0)
-        self.match_desc_combo = QComboBox()
+        self.match_desc_combo = ComboBox()
         self.match_desc_combo.setToolTip("选择本次下载使用的岗位匹配描述（默认自动匹配当前岗位）")
         control_layout.addWidget(self.match_desc_combo, 3, 1)
 
         # 下载按钮布局
         btn_layout = QHBoxLayout()
-        self.start_btn = QPushButton("开始下载")
-        self.start_btn.setIcon(self._icon("play"))
+        self.start_btn = PrimaryPushButton("开始下载")
+        self.start_btn.setIcon(FluentIcon.PLAY)
         self.start_btn.clicked.connect(self.start_download)
         self.start_btn.setEnabled(False)
 
-        self.stop_btn = QPushButton("中断下载")
-        self.stop_btn.setIcon(self._icon("stop"))
+        self.stop_btn = PushButton("中断下载")
+        self.stop_btn.setIcon(FluentIcon.CANCEL)
         self.stop_btn.clicked.connect(self.stop_download)
         self.stop_btn.setEnabled(False)
         self.stop_btn.setVisible(False)
 
-        self.pause_btn = QPushButton("暂停下载")
-        self.pause_btn.setIcon(self._icon("pause"))
+        self.pause_btn = PushButton("暂停下载")
+        self.pause_btn.setIcon(FluentIcon.PAUSE)
         self.pause_btn.clicked.connect(self.pause_download)
         self.pause_btn.setEnabled(False)
         self.pause_btn.setVisible(False)
 
-        self.resume_btn = QPushButton("继续任务")
-        self.resume_btn.setIcon(self._icon("resume"))
+        self.resume_btn = PushButton("继续任务")
+        self.resume_btn.setIcon(FluentIcon.PLAY)
         self.resume_btn.clicked.connect(self.on_resume_clicked)
         self.resume_btn.setEnabled(False)
         self.resume_btn.setVisible(False)
 
-        self.download_all_check = QCheckBox("下载所有页")
+        self.download_all_check = FluentCheckBox("下载所有页")
         self.download_all_check.setChecked(False)
 
         btn_layout.addWidget(self.start_btn)
@@ -426,7 +437,7 @@ class MainWindow(QMainWindow):
         log_layout.addWidget(self.log_text)
 
         log_btn_layout = QHBoxLayout()
-        self.clear_log_btn = QPushButton("清空日志")
+        self.clear_log_btn = PushButton("清空日志")
         self.clear_log_btn.clicked.connect(self.clear_log)
         log_btn_layout.addWidget(self.clear_log_btn)
         log_btn_layout.addStretch()
@@ -477,8 +488,8 @@ class MainWindow(QMainWindow):
         toolbar = QToolBar("工具栏", self.window_container)
         self._container_layout.insertWidget(1, toolbar)
 
-        self.toolbar_refresh_btn = QPushButton("刷新列表")
-        self.toolbar_refresh_btn.setIcon(self._icon("refresh"))
+        self.toolbar_refresh_btn = PushButton("刷新列表")
+        self.toolbar_refresh_btn.setIcon(FluentIcon.SYNC)
         self.toolbar_refresh_btn.clicked.connect(self.refresh_candidates)
         toolbar.addWidget(self.toolbar_refresh_btn)
 
@@ -1540,7 +1551,7 @@ class MainWindow(QMainWindow):
         self.candidate_table.setRowCount(len(display_candidates))
 
         for i, candidate in enumerate(display_candidates):
-            checkbox = QCheckBox()
+            checkbox = FluentCheckBox()
             checkbox.setChecked(True)
             self.candidate_table.setCellWidget(i, 0, checkbox)
 
@@ -1731,12 +1742,12 @@ class AIConfigDialog(QDialog):
         api_layout = QGridLayout()
 
         api_layout.addWidget(QLabel("API Key:"), 0, 0)
-        self.api_key_edit = QLineEdit()
+        self.api_key_edit = FluentLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_edit.setPlaceholderText("输入 MiMo API Key")
         api_layout.addWidget(self.api_key_edit, 0, 1, 1, 2)
 
-        self.test_btn = QPushButton("测试连接")
+        self.test_btn = PushButton("测试连接")
         self.test_btn.clicked.connect(self.test_connection)
         api_layout.addWidget(self.test_btn, 1, 1)
         self.test_result_label = QLabel("")
@@ -1744,7 +1755,7 @@ class AIConfigDialog(QDialog):
         api_layout.addWidget(self.test_result_label, 1, 2)
 
         api_layout.addWidget(QLabel("启用AI筛选:"), 2, 0)
-        self.enabled_check = QCheckBox()
+        self.enabled_check = FluentCheckBox()
         api_layout.addWidget(self.enabled_check, 2, 1)
 
         api_group.setLayout(api_layout)
@@ -1753,7 +1764,7 @@ class AIConfigDialog(QDialog):
         desc_group = QGroupBox("岗位匹配描述")
         desc_layout = QVBoxLayout()
 
-        self.desc_table = QTableWidget()
+        self.desc_table = TableWidget()
         self.desc_table.setColumnCount(2)
         self.desc_table.setHorizontalHeaderLabels(["岗位名称", "匹配描述"])
         self.desc_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -1765,9 +1776,9 @@ class AIConfigDialog(QDialog):
         desc_layout.addWidget(self.desc_table)
 
         btn_layout = QHBoxLayout()
-        self.add_btn = QPushButton("添加")
+        self.add_btn = PushButton("添加")
         self.add_btn.clicked.connect(self.add_description)
-        self.remove_btn = QPushButton("删除选中")
+        self.remove_btn = PushButton("删除选中")
         self.remove_btn.clicked.connect(self.remove_description)
         btn_layout.addWidget(self.add_btn)
         btn_layout.addWidget(self.remove_btn)
@@ -1783,11 +1794,11 @@ class AIConfigDialog(QDialog):
         gen_layout.addWidget(QLabel(
             "输入原始要求（用逗号分隔），点击生成后自动填入选中行的描述："
         ))
-        self.gen_input = QLineEdit()
+        self.gen_input = FluentLineEdit()
         self.gen_input.setPlaceholderText("例如：2年react, 4年经验, 本科以上, 有全栈经验")
         gen_layout.addWidget(self.gen_input)
         gen_btn_row = QHBoxLayout()
-        self.gen_btn = QPushButton("生成专业描述")
+        self.gen_btn = PrimaryPushButton("生成专业描述")
         self.gen_btn.clicked.connect(self.generate_description)
         self.gen_result_label = QLabel("")
         self.gen_result_label.setWordWrap(True)
@@ -1798,9 +1809,9 @@ class AIConfigDialog(QDialog):
         layout.addWidget(gen_group)
 
         button_layout = QHBoxLayout()
-        self.ok_btn = QPushButton("确定")
+        self.ok_btn = PrimaryPushButton("确定")
         self.ok_btn.clicked.connect(self.accept)
-        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn = PushButton("取消")
         self.cancel_btn.clicked.connect(self.reject)
         button_layout.addStretch()
         button_layout.addWidget(self.ok_btn)
@@ -1821,9 +1832,9 @@ class AIConfigDialog(QDialog):
         """添加一行：岗位名 + 描述（用真实 QLineEdit，文本始终可见）"""
         row = self.desc_table.rowCount()
         self.desc_table.insertRow(row)
-        name_edit = QLineEdit(name)
+        name_edit = FluentLineEdit(name)
         name_edit.setPlaceholderText("岗位名称，如：前端开发工程师")
-        desc_edit = QLineEdit(desc)
+        desc_edit = FluentLineEdit(desc)
         desc_edit.setPlaceholderText("输入匹配描述，如：2年react, 4年经验, 本科以上")
         self.desc_table.setCellWidget(row, 0, name_edit)
         self.desc_table.setCellWidget(row, 1, desc_edit)
