@@ -275,11 +275,22 @@ class MainWindow(QMainWindow):
         self._container_layout.addWidget(central_widget, 1)
         self._root_layout.addWidget(self.window_container)
 
-        main_layout = QHBoxLayout(central_widget)
-        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(16, 12, 16, 8)
         main_layout.setSpacing(12)
+
+        # Fluent 头部：标题 + 操作按钮（刷新/AI配置/主题/关于）
+        self._header_layout = QHBoxLayout()
+        self._header_layout.setSpacing(8)
+        title_label = QLabel("AI 简历批量初筛与下载助手")
+        title_label.setObjectName("appTitleLabel")
+        self._header_layout.addWidget(title_label)
+        self._header_layout.addStretch()
+        main_layout.addLayout(self._header_layout)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(6)
+        main_layout.addWidget(splitter, 1)
 
         # 左侧：候选人列表
         left_widget = QWidget()
@@ -448,50 +459,38 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(right_widget)
         splitter.setSizes([700, 500])
-        main_layout.addWidget(splitter)
 
     def setup_menu(self):
-        # 菜单栏放入容器内（无边框窗口不使用 QMainWindow 原生菜单栏）
-        menubar = QMenuBar(self.window_container)
-        menubar.setObjectName("appMenuBar")
-        self._container_layout.insertWidget(0, menubar)
-
-        file_menu = menubar.addMenu("文件")
-        exit_action = QAction("退出", self)
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
-
-        action_menu = menubar.addMenu("操作")
-        refresh_action = QAction("刷新候选人", self)
-        refresh_action.triggered.connect(self.refresh_candidates)
-        action_menu.addAction(refresh_action)
-
-        settings_menu = menubar.addMenu("设置")
-        ai_config_action = QAction("AI配置", self)
-        ai_config_action.triggered.connect(self.show_ai_config)
-        settings_menu.addAction(ai_config_action)
-
+        """Fluent 头部操作按钮（替代菜单栏），业务动作不变"""
         self.dark_theme_action = QAction("暗色主题", self)
         self.dark_theme_action.setCheckable(True)
         self.dark_theme_action.setChecked(self.theme == 'dark')
         self.dark_theme_action.toggled.connect(
             lambda checked: self.apply_theme('dark' if checked else 'light')
         )
-        settings_menu.addAction(self.dark_theme_action)
 
-        help_menu = menubar.addMenu("帮助")
-        about_action = QAction("关于", self)
-        about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
+        self.header_ai_btn = PushButton("AI配置")
+        self.header_ai_btn.clicked.connect(self.show_ai_config)
+        self.header_theme_btn = PushButton("暗色" if self.theme == 'light' else "亮色")
+        self.header_theme_btn.clicked.connect(self.toggle_theme_btn)
+        self.header_about_btn = PushButton("关于")
+        self.header_about_btn.clicked.connect(self.show_about)
+
+        self._header_layout.addWidget(self.header_ai_btn)
+        self._header_layout.addWidget(self.header_theme_btn)
+        self._header_layout.addWidget(self.header_about_btn)
+
+    def toggle_theme_btn(self):
+        """头部主题按钮：亮/暗切换"""
+        self.apply_theme('dark' if self.theme == 'light' else 'light')
+        self.header_theme_btn.setText("亮色" if self.theme == 'dark' else "暗色")
 
     def setup_toolbar(self):
-        toolbar = QToolBar("工具栏", self.window_container)
-        self._container_layout.insertWidget(1, toolbar)
-
-        self.toolbar_refresh_btn = PushButton("刷新列表")
+        """头部刷新按钮（替代工具栏）"""
+        self.toolbar_refresh_btn = PrimaryPushButton("刷新")
         self.toolbar_refresh_btn.setIcon(FluentIcon.SYNC)
         self.toolbar_refresh_btn.clicked.connect(self.refresh_candidates)
-        toolbar.addWidget(self.toolbar_refresh_btn)
+        self._header_layout.addWidget(self.toolbar_refresh_btn)
 
     @staticmethod
     def _icon(name):

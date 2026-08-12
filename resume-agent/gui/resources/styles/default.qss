@@ -421,6 +421,12 @@ QLabel {
     color: #0F172A;
 }
 
+QLabel#appTitleLabel {
+    font-size: 16px;
+    font-weight: 600;
+    color: #1B1B1B;
+}
+
 QCheckBox {
     spacing: 8px;
     color: #0F172A;
