@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 主窗口模块 - AI 简历批量初筛与下载助手
 """
@@ -21,7 +21,7 @@ from PyQt6.QtGui import QAction, QFont, QColor, QIcon, QShortcut, QKeySequence
 from qfluentwidgets import (
     FluentIcon, PrimaryPushButton, PushButton, ComboBox, TableWidget,
     CheckBox as FluentCheckBox, LineEdit as FluentLineEdit,
-    setTheme, Theme, setThemeColor,
+    InfoBadge, InfoLevel, setTheme, Theme, setThemeColor,
 )
 
 # 获取基础目录
@@ -507,9 +507,9 @@ class MainWindow(QMainWindow):
 
         self.candidate_count_label = QLabel("候选人: 0")
         self.download_count_label = QLabel("已下载: 0")
-        self.ai_status_label = QLabel('<span style="color:#94A3B8">●</span> AI: 未配置')
-        self.browser_status_label = QLabel('<span style="color:#94A3B8">●</span> 浏览器：未连接')
-        self.task_status_label = QLabel('<span style="color:#94A3B8">●</span> 任务状态：空闲')
+        self.ai_status_label = InfoBadge("AI: 未配置", None, InfoLevel.INFOAMTION)
+        self.browser_status_label = InfoBadge("浏览器：未连接", None, InfoLevel.INFOAMTION)
+        self.task_status_label = InfoBadge("任务状态：空闲", None, InfoLevel.INFOAMTION)
 
         self._statusbar.addPermanentWidget(self.candidate_count_label)
         self._statusbar.addPermanentWidget(self.download_count_label)
@@ -527,14 +527,14 @@ class MainWindow(QMainWindow):
         if enabled:
             self.ai_enabled_label.setText("已启用")
             self.ai_enabled_label.setStyleSheet("color: #16A34A;")
-            self.ai_status_label.setText('<span style="color:#16A34A">●</span> AI: 已启用')
-            self.ai_status_label.setStyleSheet("color: green;")
+            self.ai_status_label.setText("AI: 已启用")
+            self.ai_status_label.setLevel(InfoLevel.SUCCESS)
         else:
             reason = "未配置" if not has_key else "未启用"
             self.ai_enabled_label.setText(reason)
             self.ai_enabled_label.setStyleSheet("color: #94A3B8;")
-            self.ai_status_label.setText(f'<span style="color:#94A3B8">●</span> AI: {reason}')
-            self.ai_status_label.setStyleSheet("color: gray;")
+            self.ai_status_label.setText(f"AI: {reason}")
+            self.ai_status_label.setLevel(InfoLevel.INFOAMTION)
 
     def _refresh_match_desc_combo(self):
         """刷新下载控制区的匹配描述下拉框（自动/不使用/各岗位描述）"""
@@ -634,20 +634,13 @@ class MainWindow(QMainWindow):
         from browser.browser_state import STATE_LABELS
         state = self.browser_manager.state if self.browser_manager else 'DISCONNECTED'
         self.browser_state = state
-        dot = {
-            'CONNECTED': '#16A34A', 'READY': '#16A34A',
-            'STARTING': '#F59E0B', 'CONNECTING': '#F59E0B', 'RECONNECTING': '#F59E0B',
-            'ERROR': '#DC2626',
-        }.get(state, '#94A3B8')
-        self.browser_status_label.setText(
-            f'<span style="color:{dot}">●</span> {STATE_LABELS.get(state, f"浏览器：{state}")}'
-        )
+        self.browser_status_label.setText(STATE_LABELS.get(state, f"浏览器：{state}"))
         if state in ('CONNECTED', 'READY'):
-            self.browser_status_label.setStyleSheet("color: green;")
+            self.browser_status_label.setLevel(InfoLevel.SUCCESS)
         elif state in ('STARTING', 'CONNECTING', 'RECONNECTING'):
-            self.browser_status_label.setStyleSheet("color: orange;")
+            self.browser_status_label.setLevel(InfoLevel.WARNING)
         else:
-            self.browser_status_label.setStyleSheet("color: red;")
+            self.browser_status_label.setLevel(InfoLevel.ERROR)
 
     def _ensure_chrome_debug(self):
         """确保 Chrome 调试模式已启动，未启动则自动启动"""
@@ -853,10 +846,6 @@ class MainWindow(QMainWindow):
 
     def _update_task_status_label(self):
         """更新状态栏任务状态（方案第 29 节）"""
-        dot_green = '<span style="color:#16A34A">●</span> '
-        dot_blue = '<span style="color:#2563EB">●</span> '
-        dot_orange = '<span style="color:#F59E0B">●</span> '
-        dot_gray = '<span style="color:#94A3B8">●</span> '
         if self.current_task == 'download' and self.worker_process and self.worker_process.is_alive():
             text = "任务状态：运行中"
             if self.current_task_id:
@@ -866,11 +855,11 @@ class MainWindow(QMainWindow):
                         text = f"任务状态：运行中 {task.processed_count}/{task.total_candidates} · 第{task.current_page}页"
                 except Exception:
                     pass
-            self.task_status_label.setText(dot_blue + text)
-            self.task_status_label.setStyleSheet("color: blue;")
+            self.task_status_label.setText(text)
+            self.task_status_label.setLevel(InfoLevel.INFOAMTION)
         elif self.current_task == 'refresh':
-            self.task_status_label.setText(dot_gray + "任务状态：刷新中")
-            self.task_status_label.setStyleSheet("color: gray;")
+            self.task_status_label.setText("任务状态：刷新中")
+            self.task_status_label.setLevel(InfoLevel.INFOAMTION)
         elif self.current_task_id or self.last_task_id:
             try:
                 task = self.db.get_task(self.current_task_id or self.last_task_id)
@@ -882,20 +871,21 @@ class MainWindow(QMainWindow):
                         'failed': '失败',
                         'cancelled': '已取消',
                     }.get(task.status, task.status)
-                    dot = (dot_blue if task.status == 'running' else
-                           dot_orange if task.status == 'paused' else dot_gray)
-                    self.task_status_label.setText(dot + f"任务状态：{status_text}")
-                    color = 'blue' if task.status == 'running' else (
-                        'orange' if task.status == 'paused' else 'gray')
-                    self.task_status_label.setStyleSheet(f"color: {color};")
+                    self.task_status_label.setText(f"任务状态：{status_text}")
+                    self.task_status_label.setLevel(
+                        InfoLevel.INFOAMTION if task.status == 'running' else
+                        InfoLevel.WARNING if task.status == 'paused' else
+                        InfoLevel.SUCCESS if task.status == 'completed' else
+                        InfoLevel.ERROR if task.status == 'failed' else InfoLevel.INFOAMTION
+                    )
                     return
             except Exception:
                 pass
-            self.task_status_label.setText(dot_gray + "任务状态：空闲")
-            self.task_status_label.setStyleSheet("color: gray;")
+            self.task_status_label.setText("任务状态：空闲")
+            self.task_status_label.setLevel(InfoLevel.INFOAMTION)
         else:
-            self.task_status_label.setText(dot_gray + "任务状态：空闲")
-            self.task_status_label.setStyleSheet("color: gray;")
+            self.task_status_label.setText("任务状态：空闲")
+            self.task_status_label.setLevel(InfoLevel.INFOAMTION)
 
     def _run_db_thread(self, func, *args, **kwargs):
         """

@@ -12,12 +12,12 @@ QWidget {
 }
 
 QMainWindow {
-    background-color: #EEF2F7;
+    background-color: #F3F3F3;
 }
 
 /* 无边框窗口容器：铺满窗口，无外层边距/阴影/圆角 */
 QFrame#windowContainer {
-    background-color: #FFFFFF;
+    background-color: #F3F3F3;
     border: none;
 }
 
@@ -190,9 +190,9 @@ QTextBrowser {
 
 /* ---------- 分组卡片 ---------- */
 QGroupBox {
-    background-color: #F8FAFC;
-    border: 1px solid #E2E8F0;
-    border-radius: 10px;
+    background-color: #FFFFFF;
+    border: 1px solid #E5E5E5;
+    border-radius: 8px;
     margin-top: 14px;
     padding: 14px 12px 12px 12px;
     font-weight: 600;

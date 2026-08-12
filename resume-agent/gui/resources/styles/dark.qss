@@ -11,11 +11,11 @@ QWidget {
 }
 
 QMainWindow {
-    background-color: #0B1220;
+    background-color: #202020;
 }
 
 QFrame#windowContainer {
-    background-color: #0F172A;
+    background-color: #202020;
     border: none;
 }
 
@@ -182,9 +182,9 @@ QTextBrowser {
 }
 
 QGroupBox {
-    background-color: #1E293B;
-    border: 1px solid #334155;
-    border-radius: 10px;
+    background-color: #2B2B2B;
+    border: 1px solid #3C3C3C;
+    border-radius: 8px;
     margin-top: 14px;
     padding: 14px 12px 12px 12px;
     font-weight: 600;
