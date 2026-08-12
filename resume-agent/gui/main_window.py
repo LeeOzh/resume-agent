@@ -139,6 +139,9 @@ class MainWindow(QMainWindow):
         self.setup_toolbar()
         self.setup_statusbar()
 
+        # 根据已保存的 AI 配置刷新状态显示（否则重启后一直显示“未配置”）
+        self._update_ai_status()
+
         # 定时器检查子进程状态
         self.check_timer = QTimer()
         self.check_timer.timeout.connect(self.check_worker_status)
@@ -503,6 +506,23 @@ class MainWindow(QMainWindow):
         self._statusbar.addPermanentWidget(self.task_status_label)
         self._container_layout.addWidget(self._statusbar)
 
+    def _update_ai_status(self):
+        """根据已保存的 AI 配置刷新“AI筛选”与状态栏显示"""
+        config = load_ai_config()
+        has_key = bool(config.get("api_key"))
+        enabled = bool(config.get("enabled")) and has_key
+        if enabled:
+            self.ai_enabled_label.setText("已启用")
+            self.ai_enabled_label.setStyleSheet("color: #16A34A;")
+            self.ai_status_label.setText('<span style="color:#16A34A">●</span> AI: 已启用')
+            self.ai_status_label.setStyleSheet("color: green;")
+        else:
+            reason = "未配置" if not has_key else "未启用"
+            self.ai_enabled_label.setText(reason)
+            self.ai_enabled_label.setStyleSheet("color: #94A3B8;")
+            self.ai_status_label.setText(f'<span style="color:#94A3B8">●</span> AI: {reason}')
+            self.ai_status_label.setStyleSheet("color: gray;")
+
     # ==================== 无边框窗口 ====================
 
     def _update_window_chrome(self):
@@ -750,9 +770,16 @@ class MainWindow(QMainWindow):
             # 按当前职位查找匹配描述（job_descriptions -> match_description）
             job_descs = ai_config.get("job_descriptions", {})
             match_desc = job_descs.get(job_name, '')
+            if not match_desc:
+                # 兼容部分名称：配置 key 是岗位名子串或包含岗位名时也命中
+                for key, desc in job_descs.items():
+                    if key and desc and (key in job_name or job_name in key):
+                        match_desc = desc
+                        self.log(f"AI 匹配描述使用「{key}」的配置")
+                        break
             ai_config["match_description"] = match_desc
             if not match_desc:
-                self.log("警告: 当前职位未配置匹配描述，AI 将按空描述评估")
+                self.log(f"警告: 当前职位「{job_name}」未配置匹配描述，AI 将按空描述评估（可在 设置→AI配置 中添加）")
         else:
             ai_config = None
 
@@ -1684,13 +1711,8 @@ class MainWindow(QMainWindow):
     def show_ai_config(self):
         dialog = AIConfigDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            config = load_ai_config()
-            if config.get("enabled") and config.get("api_key"):
-                self.ai_status_label.setText('<span style="color:#16A34A">●</span> AI: 已启用')
-                self.ai_status_label.setStyleSheet("color: green;")
-            else:
-                self.ai_status_label.setText('<span style="color:#94A3B8">●</span> AI: 未启用')
-                self.ai_status_label.setStyleSheet("color: gray;")
+            self._update_ai_status()
+            self.log("AI 配置已保存")
 
     def show_about(self):
         QMessageBox.about(self, "关于",
