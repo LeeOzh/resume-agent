@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QToolBar, QStatusBar, QMenuBar, QHeaderView, QCheckBox,
     QPushButton, QLabel, QGroupBox, QGridLayout,
     QLineEdit, QDialog, QMessageBox, QProgressBar, QApplication,
-    QFileDialog, QComboBox, QFrame, QGraphicsDropShadowEffect
+    QFileDialog, QComboBox, QFrame, QGraphicsDropShadowEffect, QScrollArea
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QEvent, QPropertyAnimation, QPoint
 from PyQt6.QtGui import QAction, QFont, QColor, QIcon, QShortcut, QKeySequence
@@ -314,7 +314,17 @@ class MainWindow(QMainWindow):
 
         # 右侧：控制面板和日志
         right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_inner = QWidget()
+        right_layout = QVBoxLayout(right_inner)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_scroll.setWidget(right_inner)
+        right_container = QVBoxLayout(right_widget)
+        right_container.setContentsMargins(0, 0, 0, 0)
+        right_container.addWidget(right_scroll)
 
         # 职位选择组
         job_group = QGroupBox("职位选择")
@@ -437,7 +447,7 @@ class MainWindow(QMainWindow):
         log_layout.addLayout(log_btn_layout)
 
         log_group.setLayout(log_layout)
-        right_layout.addWidget(log_group)
+        right_layout.addWidget(log_group, 1)
 
         splitter.addWidget(right_widget)
         splitter.setSizes([700, 500])
