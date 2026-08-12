@@ -38,9 +38,16 @@ ai_config.json
 # 临时调试脚本
 resume-agent/parse_html.py
 resume-agent/test_api.py
+resume-agent/test_gui.py
 
 # HTML 分析文件（开发参考用，不上传）
-*.html.txt
+*html.txt
+*html结构.txt
+html-51job.txt
+
+# 本地运行数据与配置（不上传）
+resume-agent/data/
+resume-agent/school_filter_config.json
 
 # 其他非项目文件
 *.xls

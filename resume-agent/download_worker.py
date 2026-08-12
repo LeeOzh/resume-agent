@@ -17,7 +17,8 @@ sys.path.insert(0, str(BASE_DIR))
 
 
 def run(candidates, download_dir, job_name='', ai_config=None, 
-        download_all_pages=False, stop_event=None, task_id=None, db_path=None):
+        download_all_pages=False, stop_event=None, task_id=None, db_path=None,
+        pause_event=None):
     """
     执行下载操作
     
@@ -30,72 +31,100 @@ def run(candidates, download_dir, job_name='', ai_config=None,
         stop_event: multiprocessing.Event，用于跨进程中断
         task_id: 数据库任务ID，用于候选人状态实时持久化
         db_path: 数据库文件路径（默认使用项目配置）
+        pause_event: multiprocessing.Event，暂停请求（当前候选人完成后暂停）
     """
-    from playwright.sync_api import sync_playwright
-    from config import CHROME_DEBUG_PORT
-
     # 兼容旧调用：只传姓名列表
     if candidates and isinstance(candidates[0], str):
         candidates = [{'name': n} for n in candidates]
 
-    # 数据库持久化（候选人状态实时写入）
-    db = None
+    # 数据库持久化（候选人状态实时写入，禁止攒到最后一次性保存）
+    tm = None
     if task_id:
         try:
-            from db import Database
-            db = Database(db_path) if db_path else Database()
+            from task import TaskManager
+            tm = TaskManager(db_path) if db_path else TaskManager()
         except Exception:
-            db = None
+            tm = None
 
     def is_stopped():
         """检查是否已停止"""
         return stop_event is not None and stop_event.is_set()
 
-    def persist_candidate(candidate, page_num, download_result):
-        """将候选人处理结果写入数据库"""
-        if not db or not task_id:
-            return
+    def is_pause_requested():
+        """检查是否请求暂停（当前候选人完成后暂停）"""
+        return pause_event is not None and pause_event.is_set()
+
+    def candidate_ext_id(candidate):
+        """获取候选人外部ID（优先显式ID，否则姓名+学校+专业hash）"""
+        if candidate.get('external_id'):
+            return candidate['external_id']
         try:
             from db.models import generate_candidate_external_id
+            return generate_candidate_external_id(
+                candidate.get('name', ''),
+                candidate.get('school', '') or '',
+                candidate.get('major', '') or '',
+            )
+        except Exception:
+            return candidate.get('name', '') or ''
+
+    def get_candidate_status(candidate):
+        """查询候选人当前状态，用于跳过已处理候选人"""
+        if not tm or not task_id:
+            return None
+        try:
+            ext_id = candidate_ext_id(candidate)
+            c = tm.db.get_candidate_by_external_id(task_id, ext_id)
+            return c.status if c else None
+        except Exception:
+            return None
+
+    def persist_candidate(candidate, page_num, download_result):
+        """将候选人处理结果写入数据库（每个候选人立即保存）"""
+        if not tm or not task_id:
+            return
+        try:
             name = candidate.get('name', '')
             school = candidate.get('school', '') or ''
             major = candidate.get('major', '') or ''
             education = candidate.get('education', '') or ''
-            db.add_candidate(task_id, {
+            ext_id = candidate_ext_id(candidate)
+            tm.upsert_candidate(task_id, {
+                'external_id': ext_id,
                 'name': name,
                 'school': school,
                 'major': major,
                 'education': education,
                 'page': page_num,
+                'sort_index': candidate.get('sort_index', 0),
             })
-            ext_id = generate_candidate_external_id(name, school, major)
             if download_result.get('ai_pass') is not None:
-                db.update_candidate_ai_result(
+                tm.save_ai_result(
                     task_id, ext_id,
                     ai_pass=bool(download_result.get('ai_pass')),
                     ai_reason=download_result.get('ai_reason', '') or '',
                 )
             if download_result.get('success'):
-                status = 'success'
+                tm.mark_candidate_downloaded(
+                    task_id, ext_id,
+                    file_path=download_result.get('file_path', '') or '',
+                )
             elif download_result.get('ai_pass') is False:
-                status = 'skipped'
+                pass  # save_ai_result 已把状态置为 ai_rejected
             else:
-                status = 'failed'
-            db.update_candidate_download_status(
-                task_id, ext_id,
-                status=status,
-                file_path=download_result.get('file_path', '') or '',
-                error_message=download_result.get('error', '') or '',
-            )
+                tm.mark_candidate_failed(
+                    task_id, ext_id,
+                    error=download_result.get('error', '') or '',
+                )
         except Exception:
             pass
 
     def update_task_progress(**stats):
         """更新任务进度"""
-        if not db or not task_id:
+        if not tm or not task_id:
             return
         try:
-            db.update_task_progress(task_id, **stats)
+            tm.update_progress(task_id, **stats)
         except Exception:
             pass
 
@@ -107,37 +136,55 @@ def run(candidates, download_dir, job_name='', ai_config=None,
         'error': ''
     }
 
+    # 从数据库恢复已累计的进度（恢复任务时计数不归零，方案第 21 节）
+    base_counters = {'processed': 0, 'success': 0, 'failed': 0, 'ai_pass': 0, 'ai_fail': 0}
+    if tm and task_id:
+        try:
+            t = tm.get_task(task_id)
+            base_counters['processed'] = t.processed_count or 0
+            base_counters['success'] = t.success_count or 0
+            base_counters['failed'] = t.failed_count or 0
+            base_counters['ai_pass'] = t.ai_pass_count or 0
+            base_counters['ai_fail'] = t.ai_fail_count or 0
+        except Exception:
+            pass
+
     try:
-        # 检测端口
-        import socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2)
-        port_open = sock.connect_ex(('127.0.0.1', CHROME_DEBUG_PORT)) == 0
-        sock.close()
+        from browser.browser_manager import BrowserManager
+        from browser.page_detector import PageDetector, LoginStatus
 
-        if not port_open:
-            result['error'] = f'调试端口 {CHROME_DEBUG_PORT} 未开放，请确认 Chrome 调试模式已启动'
+        # 统一由 BrowserManager 启动/连接（方案第 3 节）
+        manager = BrowserManager()
+        if not manager.initialize(auto_launch=True):
+            result['error'] = manager.last_error or '浏览器连接失败'
             return result
 
-        # 连接浏览器
-        pw = sync_playwright().start()
-        browser = pw.chromium.connect_over_cdp(f'http://localhost:{CHROME_DEBUG_PORT}')
-
-        contexts = browser.contexts
-        if not contexts:
-            result['error'] = '未找到浏览器上下文'
-            pw.stop()
-            return result
-
-        context = contexts[0]
-        pages = context.pages
-
-        if not pages:
+        context = manager.context
+        page = manager.get_page()
+        if not page or not context:
             result['error'] = '未找到打开的页面'
-            pw.stop()
+            manager.close()
             return result
 
-        page = pages[-1]
+        # 登录状态检测：登录失效时禁止候选人自动化操作（方案第 9 节）
+        if PageDetector.is_logged_in(page=page) == LoginStatus.EXPIRED:
+            result['error'] = '前程无忧登录状态已失效，请重新登录'
+            result['login_expired'] = True
+            manager.close()
+            return result
+
+        def ensure_browser_ready():
+            """浏览器健康检查，断开时自动重连（最多3次）"""
+            if manager.health_check():
+                return True
+            return manager.reconnect()
+
+        def refresh_page():
+            """重连后重新获取 page/context"""
+            nonlocal page, context
+            page = manager.get_page()
+            context = manager.context
+            return page is not None and context is not None
 
         # 创建下载目录
         download_path = Path(download_dir)
@@ -146,11 +193,11 @@ def run(candidates, download_dir, job_name='', ai_config=None,
         all_results = []
         page_num = 1
         global_index = 0
-        processed_count = 0
-        success_count = 0
-        failed_count = 0
-        ai_pass_count = 0
-        ai_fail_count = 0
+        processed_count = base_counters['processed']
+        success_count = base_counters['success']
+        failed_count = base_counters['failed']
+        ai_pass_count = base_counters['ai_pass']
+        ai_fail_count = base_counters['ai_fail']
 
         def record(candidate, page_no, download_result):
             """统计并持久化单个候选人的处理结果"""
@@ -179,6 +226,14 @@ def run(candidates, download_dir, job_name='', ai_config=None,
             # 分页下载模式
             while not is_stopped():
                 # 收集当前页候选人（含学校/专业/学历信息）
+                if not ensure_browser_ready() or not refresh_page():
+                    result['error'] = '浏览器断开且自动重连失败，任务已暂停'
+                    result['paused'] = True
+                    break
+                if PageDetector.is_logged_in(page=page) == LoginStatus.EXPIRED:
+                    result['error'] = '前程无忧登录状态已失效，任务已暂停，请重新登录后继续'
+                    result['login_expired'] = True
+                    break
                 current_candidates = collect_all_candidates_with_scroll(page)
                 if not current_candidates:
                     break
@@ -191,18 +246,49 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                 for cand in current_candidates:
                     if is_stopped():
                         break
+                    if is_pause_requested():
+                        break
+
+                    if not ensure_browser_ready() or not refresh_page():
+                        result['error'] = '浏览器断开且自动重连失败，任务已暂停'
+                        result['paused'] = True
+                        break
+                    if PageDetector.is_logged_in(page=page) == LoginStatus.EXPIRED:
+                        result['error'] = '前程无忧登录状态已失效，任务已暂停，请重新登录后继续'
+                        result['login_expired'] = True
+                        break
+
+                    # 已处理候选人直接跳过（方案第 25/26 节）
+                    cand_status = get_candidate_status(cand)
+                    if cand_status in ('downloaded', 'ai_rejected'):
+                        continue
 
                     global_index += 1
                     name = cand.get('name', '')
+                    # 标记处理中
+                    if tm and task_id:
+                        try:
+                            tm.mark_candidate_processing(task_id, candidate_ext_id(cand))
+                        except Exception:
+                            pass
                     download_result = download_single_resume(
                         context, page, name, download_path, global_index, ai_config, job_name
                     )
+                    # 失败重试一次（AI不通过不重试）
+                    if (not download_result.get('success')
+                            and download_result.get('ai_pass') is not False):
+                        time.sleep(2)
+                        download_result = download_single_resume(
+                            context, page, name, download_path, global_index, ai_config, job_name
+                        )
                     download_result['page'] = page_num
                     all_results.append(download_result)
                     record(cand, page_num, download_result)
                     time.sleep(1)
 
                 if is_stopped():
+                    break
+                if is_pause_requested():
                     break
 
                 # 检测是否有下一页
@@ -222,14 +308,41 @@ def run(candidates, download_dir, job_name='', ai_config=None,
             for i, cand in enumerate(candidates, 1):
                 if is_stopped():
                     break
+                if is_pause_requested():
+                    break
+
+                if not ensure_browser_ready() or not refresh_page():
+                    result['error'] = '浏览器断开且自动重连失败，任务已暂停'
+                    result['paused'] = True
+                    break
+                if PageDetector.is_logged_in(page=page) == LoginStatus.EXPIRED:
+                    result['error'] = '前程无忧登录状态已失效，任务已暂停，请重新登录后继续'
+                    result['login_expired'] = True
+                    break
 
                 name = cand.get('name', '')
                 if not name:
                     continue
 
+                cand_status = get_candidate_status(cand)
+                if cand_status in ('downloaded', 'ai_rejected'):
+                    continue
+
+                if tm and task_id:
+                    try:
+                        tm.mark_candidate_processing(task_id, candidate_ext_id(cand))
+                    except Exception:
+                        pass
                 download_result = download_single_resume(
                     context, page, name, download_path, i, ai_config, job_name
                 )
+                # 失败重试一次（AI不通过不重试）
+                if (not download_result.get('success')
+                        and download_result.get('ai_pass') is not False):
+                    time.sleep(2)
+                    download_result = download_single_resume(
+                        context, page, name, download_path, i, ai_config, job_name
+                    )
                 download_result['page'] = 1
                 all_results.append(download_result)
                 record(cand, 1, download_result)
@@ -239,8 +352,9 @@ def run(candidates, download_dir, job_name='', ai_config=None,
         result['total_pages'] = page_num
         result['current_page'] = page_num
         result['success'] = True
+        result['paused'] = is_pause_requested() or is_stopped() or bool(result.get('paused'))
 
-        pw.stop()
+        manager.close()
 
     except Exception as e:
         result['error'] = str(e)
@@ -422,40 +536,83 @@ def download_single_resume(context, page, candidate_name, download_dir, index, a
         except Exception:
             pass
 
-        # 点击候选人
+        # 点击候选人：优先用 expect_popup 捕获新标签页/弹窗；
+        # 兼容同页跳转（SPA）与姓名元素点击
         pages_before = len(context.pages)
-        element.click()
+        url_before = page.url
+        detail_page = None
 
-        # 等待新标签页出现
+        try:
+            with page.expect_popup(timeout=8000) as popup_info:
+                element.click()
+            detail_page = popup_info.value
+        except Exception:
+            pass
+
+        # 未捕获到弹窗：等待新页面或同页跳转
         for _ in range(16):
+            if detail_page is not None:
+                break
             time.sleep(0.5)
             if len(context.pages) > pages_before:
+                detail_page = context.pages[-1]
                 break
+            try:
+                if page.url != url_before:      # 同页跳转（SPA 打开详情）
+                    detail_page = page
+                    break
+            except Exception:
+                pass
 
-        pages = context.pages
-        if len(pages) <= pages_before:
-            result["error"] = "未打开新标签页"
+        if detail_page is None:
+            # 兜底：点击姓名元素（部分页面点击行为挂在姓名上）
+            try:
+                name_el = find_name_element(page, candidate_name)
+                if name_el:
+                    name_el.click()
+                    for _ in range(12):
+                        time.sleep(0.5)
+                        if len(context.pages) > pages_before:
+                            detail_page = context.pages[-1]
+                            break
+                        try:
+                            if page.url != url_before:
+                                detail_page = page
+                                break
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        if detail_page is None:
+            # 兜底：当前页已异步渲染成详情
+            try:
+                has_detail = page.evaluate('''() => {
+                    const q = (s) => !!document.querySelector(s);
+                    return q('.attach_resume_item') || q('#attachment') ||
+                           !!(document.body && document.body.innerText.includes('附件个人信息'));
+                }''')
+                if has_detail:
+                    detail_page = page
+            except Exception:
+                pass
+
+        if detail_page is None:
+            try:
+                cur_url = page.url
+                cur_title = page.title()
+            except Exception:
+                cur_url = cur_title = ''
+            result["error"] = f"未打开新标签页（url={cur_url[:90]} title={cur_title[:40]}）"
             return result
 
-        detail_page = pages[-1]
-
-        # 尝试查找附件按钮
-        attachment_btn = None
-        for attempt in range(2):
-            time.sleep(1)
-            for sel in ['span:has-text("附件个人信息")', ':text("附件个人信息")']:
-                try:
-                    el = detail_page.query_selector(sel)
-                    if el and el.is_visible():
-                        attachment_btn = el
-                        break
-                except Exception:
-                    continue
-            if attachment_btn:
-                break
+        # 尝试查找附件个人信息入口（页面异步加载，最多等12秒）
+        attachment_btn = find_attachment_button(detail_page, timeout=12)
 
         if not attachment_btn:
-            result["error"] = "未找到附件按钮"
+            # 保存页面诊断信息，并把诊断摘要直接带回结果
+            diag = save_attachment_debug(detail_page, candidate_name)
+            result["error"] = f"未找到附件按钮（诊断: {diag}）"
             detail_page.close()
             return result
 
@@ -595,6 +752,107 @@ def download_single_resume(context, page, candidate_name, download_dir, index, a
     return result
 
 
+def find_attachment_button(detail_page, timeout=12):
+    """
+    查找详情页“附件个人信息”入口。
+
+    页面异步加载，最多轮询 timeout 秒；支持：
+    - 真实结构：div.attach_resume_item（含图标 + 文本“附件个人信息”），优先返回该容器
+    - 直接可见的文本元素
+    - 文本位于隐藏 tooltip（Element UI el-tooltip）时，向上找可见的祖先触发元素
+    """
+    selectors = [
+        '.attach_resume_item:has-text("附件个人信息")',
+        '.attach_resume_item',
+        'span:has-text("附件个人信息")',
+        ':text("附件个人信息")',
+        'span:text-is("附件个人信息")',
+        '[title*="附件个人信息"]',
+        '[aria-label*="附件个人信息"]',
+        '.el-tooltip:has-text("附件个人信息")',
+        '[class*="attachment"]:has-text("附件个人信息")',
+    ]
+    for _ in range(timeout):
+        for sel in selectors:
+            try:
+                el = detail_page.query_selector(sel)
+                if not el:
+                    continue
+                # 容器元素直接作为点击目标（图标+文本的父容器）
+                if sel.startswith('.attach_resume_item'):
+                    return el
+                if el.is_visible():
+                    return el
+                # 文本元素不可见时，向上找可见的可点击祖先（tooltip 图标场景）
+                try:
+                    handle = el.evaluate_handle('''(el) => {
+                        let p = el;
+                        while (p) {
+                            if (p.offsetParent !== null &&
+                                ['DIV', 'IMG', 'A', 'BUTTON', 'SPAN'].includes(p.tagName)) {
+                                return p;
+                            }
+                            p = p.parentElement;
+                        }
+                        return null;
+                    }''')
+                    ancestor = handle.as_element() if handle else None
+                    if ancestor and ancestor.is_visible():
+                        return ancestor
+                except Exception:
+                    pass
+            except Exception:
+                continue
+        time.sleep(1)
+    return None
+
+
+def save_attachment_debug(detail_page, candidate_name) -> str:
+    """
+    附件入口未找到时，保存页面关键片段到 logs/，并返回诊断摘要。
+
+    Returns:
+        诊断摘要字符串（attach_item 数量 / 文本是否包含 / url / title）
+    """
+    try:
+        import re as _re
+        snippet = detail_page.evaluate('''() => {
+            const parts = [];
+            const attachItems = document.querySelectorAll('.attach_resume_item');
+            parts.push('ATTACH_ITEMS: ' + attachItems.length);
+            parts.push('ATTACH_ITEM_HTML: ' + (attachItems[0] ? attachItems[0].outerHTML.substring(0, 1500) : ''));
+            const attach = document.querySelector('#attachment');
+            if (attach) parts.push('ID_ATTACHMENT: ' + attach.outerHTML.substring(0, 4000));
+            const tooltips = document.querySelectorAll('.el-tooltip, [class*="attachment"], [title*="附件"]');
+            parts.push('TOOLTIPS: ' + Array.from(tooltips).slice(0, 10)
+                .map(e => e.outerHTML.substring(0, 400)).join('\\n'));
+            parts.push('URL: ' + location.href);
+            parts.push('TEXT: ' + (document.body ? document.body.innerText.substring(0, 800) : ''));
+            return parts.join('\\n-----\\n');
+        }''')
+        diag_parts = []
+        if snippet:
+            for line in snippet.splitlines()[:3]:
+                diag_parts.append(line.split(':', 1)[0] + '=' + (line.split(':', 1)[1] if ':' in line else ''))
+        try:
+            url = detail_page.url or ''
+            title = detail_page.title() or ''
+        except Exception:
+            url = title = ''
+        summary = ' | '.join(diag_parts)
+        summary += f" | url={url[:80]} | title={title[:40]}"
+
+        debug_dir = BASE_DIR / "logs"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        safe = _re.sub(r'[\\/:*?"<>|]', '_', candidate_name or 'candidate')
+        path = debug_dir / f"attachment_debug_{safe}.html"
+        path.write_text(snippet or '', encoding="utf-8")
+        print(f"      附件检测失败，诊断已保存: {path}")
+        return summary
+    except Exception:
+        return "诊断生成失败"
+
+
 def find_candidate_by_name(page, name):
     """根据姓名查找候选人元素"""
     try:
@@ -616,6 +874,31 @@ def find_candidate_by_name(page, name):
     except Exception:
         pass
 
+    return None
+
+
+def find_name_element(page, name):
+    """根据姓名查找候选人姓名元素（点击兜底用）"""
+    try:
+        index = page.evaluate('''(name) => {
+            const items = document.querySelectorAll('.item.virtual_list');
+            for (let i = 0; i < items.length; i++) {
+                const nameEl = items[i].querySelector('.detail .firstline .name') || items[i].querySelector('.name');
+                if (nameEl && nameEl.textContent.trim() === name) {
+                    return i;
+                }
+            }
+            return -1;
+        }''', name)
+        if index >= 0:
+            items = page.query_selector_all('.item.virtual_list')
+            if index < len(items):
+                return (
+                    items[index].query_selector('.detail .firstline .name')
+                    or items[index].query_selector('.name')
+                )
+    except Exception:
+        pass
     return None
 
 

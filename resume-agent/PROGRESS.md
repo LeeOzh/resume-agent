@@ -78,6 +78,85 @@ resume-agent/
 
 ## 更新日志
 
+### 2026-08-12（UI 现代化改造 · PyQt6 深度美化）
+
+按《UI现代化改造方案.md》分阶段实施：
+
+#### 阶段1：视觉基础
+- 全新亮色主题（default.qss）+ 暗色主题（dark.qss），统一设计令牌
+- 主色蓝 #2563EB、成功绿、危险红、警告橙、圆角/间距规范
+- 所有控件状态全覆盖：hover/pressed/disabled/focus、表格选中/悬停、滚动条、菜单、提示
+
+#### 阶段2：无边框窗口 + 自定义标题栏
+- 新增 gui/widgets/title_bar.py：标题栏拖拽、双击最大化、最小化/最大化/关闭（MDL2 图标）
+- 窗口圆角 + 投影阴影，最大化时自动去圆角/阴影/边距
+- Windows 边缘拖拽缩放（WM_NCHITTEST）
+- 菜单栏/工具栏/状态栏移入圆角容器
+- 设置菜单新增“暗色主题”切换
+- **修复 PyQt6 6.11 崩溃坑**：覆写 nativeEvent 后调用 super().nativeEvent() 触发
+  QtCore.pyd 访问违例；改为不调用 super、未处理消息返回 (False, 0)
+
+#### 阶段3：组件精细化
+- 表格新增“处理记录”徽标列（●已下载绿 / ●失败红 / ●AI淘汰橙 + 悬浮详情）
+- 表格空状态提示
+- SVG 图标集（刷新/下载/中断/暂停/继续）接入工具栏与下载按钮
+- 操作日志按级别/关键词着色（错误红/成功绿/警告橙/时间灰）
+- 任务进度条平滑动画（QPropertyAnimation），下载中实时更新
+
+#### 阶段4：布局与交互
+- 状态栏升级为状态条：浏览器/任务/AI 状态带彩色圆点
+- 快捷键：F5 刷新、Ctrl+Enter 开始下载
+- 卡片化面板（QGroupBox 统一圆角/留白）
+
+#### 阶段5：验收与打包
+- 亮/暗主题截图验证、主程序启动冒烟通过
+- 重新打包 exe
+
+### 2026-08-12（浏览器状态管理与任务恢复改造）
+
+按照《ResumeAgent_浏览器状态管理与任务恢复改造方案》完成改造：
+
+#### 第一阶段：SQLite 表结构对齐（含旧库自动迁移）
+- jobs 增加 external_job_id / company_name / job_url / status
+- tasks 增加 ai_config_snapshot / candidate_list_url / current_candidate_id / downloaded_count / rejected_count
+- task_candidates 增加 status / sort_index / processed_at（状态机字段）
+- task_logs 增加 event_type / candidate_id
+- 旧数据库启动时自动 ALTER TABLE 补齐字段并回填状态，无需手动迁移
+
+#### 第二阶段：TaskManager + 候选人状态机
+- 新增 task/task_manager.py / task_state.py：任务创建/暂停/恢复/完成/取消 + 候选人状态流转
+- 候选人状态：pending -> processing -> ai_rejected/downloading -> downloaded/failed
+- 每个候选人处理完立即写库（禁止最后一次性保存）
+- AI 配置快照：任务创建时保存，运行期间不受全局配置修改影响
+- 恢复任务时计数从数据库累计，不归零
+
+#### 第三阶段：BrowserManager
+- 新增 browser/browser_manager.py（状态机 DISCONNECTED/STARTING/CONNECTING/CONNECTED/READY/RECONNECTING/ERROR）
+- Chrome 启动/连接/健康检查/自动重连（3次，等待3/5/10秒）统一收口
+- 独立 Profile：%LOCALAPPDATA%\ResumeAgent\chrome-profile（不再用 C:/chrome-agent）
+- browser_worker / download_worker 不再各自 connect_over_cdp，统一走 BrowserManager
+
+#### 第四阶段：PageDetector 页面/登录检测
+- 新增 browser/page_detector.py：URL + DOM 特征组合判断
+- 页面类型：LOGIN_PAGE / JOB_LIST_PAGE / CANDIDATE_LIST_PAGE / RESUME_DETAIL 等
+- 登录状态：logged_in / expired / unknown（登录页特征来自 51job 登录页 HTML 分析）
+- 登录失效时禁止候选人自动化操作，任务自动暂停
+
+#### 第五阶段：启动与任务恢复
+- 启动时（不依赖刷新成功）检测未完成任务，显示进度/当前页/已下载/AI淘汰/浏览器/登录状态
+- 恢复前按序校验：浏览器 -> 登录状态 -> 页面类型 -> 岗位匹配 -> 定位当前页
+- 岗位不匹配时禁止继续，提示并可一键切换
+- 恢复只处理 pending/processing/failed 候选人，已下载/已淘汰自动跳过
+
+#### 第六阶段：暂停/继续/异常恢复/重试
+- GUI 新增 暂停下载 / 继续任务 按钮；暂停在当前候选人完成后生效
+- 下载过程中每 5 秒浏览器健康检查，断开自动重连
+- 登录失效自动暂停并提示重新登录
+- 非 AI 淘汰的失败自动重试一次
+- 状态栏新增 浏览器状态 与 任务状态 显示
+- 刷新列表自动过滤已下载/AI淘汰候选人，下载失败保留并显示“处理记录”
+- 附件入口检测增强：等待放宽至12秒、多选择器、tooltip 图标兜底、失败保存诊断日志
+
 ### 2026-08-11
 
 - 候选人状态实时持久化到 SQLite（AI结果、下载状态、任务进度）

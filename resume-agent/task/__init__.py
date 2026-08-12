@@ -1,0 +1,19 @@
+# -*- coding: utf-8 -*-
+"""
+任务管理模块（TaskManager）
+"""
+from .task_manager import TaskManager
+from .task_state import (
+    TASK_PENDING, TASK_RUNNING, TASK_PAUSED, TASK_COMPLETED,
+    TASK_FAILED, TASK_CANCELLED,
+    CAND_PENDING, CAND_PROCESSING, CAND_AI_REJECTED,
+    CAND_DOWNLOADING, CAND_DOWNLOADED, CAND_FAILED,
+)
+
+__all__ = [
+    'TaskManager',
+    'TASK_PENDING', 'TASK_RUNNING', 'TASK_PAUSED', 'TASK_COMPLETED',
+    'TASK_FAILED', 'TASK_CANCELLED',
+    'CAND_PENDING', 'CAND_PROCESSING', 'CAND_AI_REJECTED',
+    'CAND_DOWNLOADING', 'CAND_DOWNLOADED', 'CAND_FAILED',
+]

@@ -29,6 +29,7 @@ class Database:
         self.db_path = db_path
         self._ensure_dir()
         self._init_db()
+        self._migrate_db()
     
     def _ensure_dir(self):
         """确保数据库目录存在"""
@@ -56,9 +57,13 @@ class Database:
             conn.executescript('''
                 CREATE TABLE IF NOT EXISTS jobs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    external_job_id TEXT DEFAULT '',
                     name TEXT NOT NULL UNIQUE,
+                    company_name TEXT DEFAULT '',
                     page_url TEXT DEFAULT '',
+                    job_url TEXT DEFAULT '',
                     is_active INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'active',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
@@ -72,16 +77,21 @@ class Database:
                     ai_enabled INTEGER DEFAULT 0,
                     ai_api_key TEXT DEFAULT '',
                     ai_match_description TEXT DEFAULT '',
+                    ai_config_snapshot TEXT DEFAULT '',
                     
                     download_dir TEXT DEFAULT '',
                     download_all_pages INTEGER DEFAULT 0,
+                    candidate_list_url TEXT DEFAULT '',
+                    current_candidate_id TEXT DEFAULT '',
                     
                     total_candidates INTEGER DEFAULT 0,
                     processed_count INTEGER DEFAULT 0,
                     success_count INTEGER DEFAULT 0,
+                    downloaded_count INTEGER DEFAULT 0,
                     failed_count INTEGER DEFAULT 0,
                     ai_pass_count INTEGER DEFAULT 0,
                     ai_fail_count INTEGER DEFAULT 0,
+                    rejected_count INTEGER DEFAULT 0,
                     
                     current_page INTEGER DEFAULT 1,
                     total_pages INTEGER DEFAULT 1,
@@ -106,6 +116,8 @@ class Database:
                     education TEXT DEFAULT '',
                     
                     page_num INTEGER DEFAULT 1,
+                    sort_index INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'pending',
                     
                     ai_processed INTEGER DEFAULT 0,
                     ai_pass INTEGER,
@@ -118,6 +130,7 @@ class Database:
                     
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    processed_at TIMESTAMP,
                     
                     FOREIGN KEY (task_id) REFERENCES tasks(id),
                     UNIQUE(task_id, candidate_external_id)
@@ -126,6 +139,8 @@ class Database:
                 CREATE TABLE IF NOT EXISTS task_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id INTEGER NOT NULL,
+                    event_type TEXT DEFAULT 'task_log',
+                    candidate_id INTEGER,
                     level TEXT DEFAULT 'info',
                     message TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -139,6 +154,67 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_task_candidates_external_id ON task_candidates(candidate_external_id);
                 CREATE INDEX IF NOT EXISTS idx_task_candidates_status ON task_candidates(download_status);
             ''')
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _ensure_column(self, conn, table: str, column: str, ddl: str):
+        """确保表存在指定列，不存在则 ALTER TABLE 添加（轻量迁移）"""
+        cols = {row['name'] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+    def _migrate_db(self):
+        """对旧版数据库做增量迁移：补齐改造方案要求的新字段"""
+        conn = self._get_conn()
+        try:
+            # jobs
+            self._ensure_column(conn, 'jobs', 'external_job_id', "TEXT DEFAULT ''")
+            self._ensure_column(conn, 'jobs', 'company_name', "TEXT DEFAULT ''")
+            self._ensure_column(conn, 'jobs', 'job_url', "TEXT DEFAULT ''")
+            self._ensure_column(conn, 'jobs', 'status', "TEXT DEFAULT 'active'")
+            # 旧数据回填：external_job_id 使用岗位名
+            conn.execute(
+                "UPDATE jobs SET external_job_id = name "
+                "WHERE external_job_id IS NULL OR external_job_id = ''"
+            )
+            try:
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_external_id "
+                    "ON jobs(external_job_id)"
+                )
+            except sqlite3.IntegrityError:
+                pass  # 历史数据存在重复时放弃唯一索引
+
+            # tasks
+            self._ensure_column(conn, 'tasks', 'ai_config_snapshot', "TEXT DEFAULT ''")
+            self._ensure_column(conn, 'tasks', 'candidate_list_url', "TEXT DEFAULT ''")
+            self._ensure_column(conn, 'tasks', 'current_candidate_id', "TEXT DEFAULT ''")
+            self._ensure_column(conn, 'tasks', 'downloaded_count', "INTEGER DEFAULT 0")
+            self._ensure_column(conn, 'tasks', 'rejected_count', "INTEGER DEFAULT 0")
+
+            # task_candidates
+            self._ensure_column(conn, 'task_candidates', 'sort_index', "INTEGER DEFAULT 0")
+            self._ensure_column(conn, 'task_candidates', 'status', "TEXT DEFAULT 'pending'")
+            self._ensure_column(conn, 'task_candidates', 'processed_at', "TIMESTAMP")
+            # 旧数据回填状态
+            conn.execute(
+                "UPDATE task_candidates SET status='downloaded' "
+                "WHERE status='pending' AND download_status='success'"
+            )
+            conn.execute(
+                "UPDATE task_candidates SET status='ai_rejected' "
+                "WHERE status='pending' AND download_status='skipped'"
+            )
+            conn.execute(
+                "UPDATE task_candidates SET status='failed' "
+                "WHERE status='pending' AND download_status='failed'"
+            )
+
+            # task_logs
+            self._ensure_column(conn, 'task_logs', 'event_type', "TEXT DEFAULT 'task_log'")
+            self._ensure_column(conn, 'task_logs', 'candidate_id', "INTEGER")
+
             conn.commit()
         finally:
             conn.close()
@@ -158,39 +234,63 @@ class Database:
                     continue
                 
                 is_active = pos.get('active', False)
+                external_job_id = pos.get('external_id', '') or name
+                company_name = pos.get('company_name', '') or ''
+                job_url = pos.get('job_url', '') or ''
                 
-                # 尝试更新
+                # 尝试按 external_job_id 更新，其次按名称更新
                 cursor = conn.execute(
-                    "UPDATE jobs SET is_active=?, updated_at=? WHERE name=?",
-                    (1 if is_active else 0, now, name)
+                    "UPDATE jobs SET name=?, company_name=?, job_url=?, is_active=?, "
+                    "status=?, updated_at=? WHERE external_job_id=?",
+                    (name, company_name, job_url, 1 if is_active else 0,
+                     'active' if is_active else 'inactive', now, external_job_id)
                 )
+                if cursor.rowcount == 0:
+                    cursor = conn.execute(
+                        "UPDATE jobs SET external_job_id=?, company_name=?, job_url=?, "
+                        "is_active=?, status=?, updated_at=? WHERE name=?",
+                        (external_job_id, company_name, job_url, 1 if is_active else 0,
+                         'active' if is_active else 'inactive', now, name)
+                    )
                 
                 if cursor.rowcount == 0:
                     # 不存在则插入
                     cursor = conn.execute(
-                        "INSERT INTO jobs (name, is_active, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                        (name, 1 if is_active else 0, now, now)
+                        "INSERT INTO jobs (external_job_id, name, company_name, job_url, "
+                        "is_active, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (external_job_id, name, company_name, job_url,
+                         1 if is_active else 0,
+                         'active' if is_active else 'inactive', now, now)
                     )
                 
                 job_id = cursor.lastrowid if cursor.rowcount == 0 else None
                 if job_id is None:
-                    row = conn.execute("SELECT id FROM jobs WHERE name=?", (name,)).fetchone()
+                    row = conn.execute(
+                        "SELECT id FROM jobs WHERE external_job_id=? OR name=?",
+                        (external_job_id, name)
+                    ).fetchone()
                     job_id = row['id'] if row else None
                 
                 jobs.append(Job(
                     id=job_id,
+                    external_job_id=external_job_id,
                     name=name,
+                    company_name=company_name,
+                    job_url=job_url,
                     is_active=is_active,
+                    status='active' if is_active else 'inactive',
                     updated_at=now
                 ))
             
             # 将不在列表中的岗位设为非活跃
-            active_names = [p.get('name', '') for p in positions]
-            if active_names:
-                placeholders = ','.join(['?' for _ in active_names])
+            active_ids = [p.get('external_id', '') or p.get('name', '') for p in positions]
+            active_ids = [i for i in active_ids if i]
+            if active_ids:
+                placeholders = ','.join(['?' for _ in active_ids])
                 conn.execute(
-                    f"UPDATE jobs SET is_active=0, updated_at=? WHERE name NOT IN ({placeholders})",
-                    [now] + active_names
+                    f"UPDATE jobs SET is_active=0, status='inactive', updated_at=? "
+                    f"WHERE external_job_id NOT IN ({placeholders}) AND name NOT IN ({placeholders})",
+                    [now] + active_ids + active_ids
                 )
             
             conn.commit()
@@ -206,9 +306,13 @@ class Database:
             if row:
                 return Job(
                     id=row['id'],
+                    external_job_id=row['external_job_id'] or '',
                     name=row['name'],
+                    company_name=row['company_name'] or '',
                     page_url=row['page_url'],
+                    job_url=row['job_url'] or '',
                     is_active=bool(row['is_active']),
+                    status=row['status'] or 'active',
                     created_at=row['created_at'],
                     updated_at=row['updated_at']
                 )
@@ -224,9 +328,13 @@ class Database:
             if row:
                 return Job(
                     id=row['id'],
+                    external_job_id=row['external_job_id'] or '',
                     name=row['name'],
+                    company_name=row['company_name'] or '',
                     page_url=row['page_url'],
+                    job_url=row['job_url'] or '',
                     is_active=bool(row['is_active']),
+                    status=row['status'] or 'active',
                     created_at=row['created_at'],
                     updated_at=row['updated_at']
                 )
@@ -237,33 +345,38 @@ class Database:
     # ==================== Tasks ====================
     
     def create_task(self, job_name: str, ai_config: dict, download_dir: str, 
-                    download_all_pages: bool = False, total_candidates: int = 0) -> Task:
+                    download_all_pages: bool = False, total_candidates: int = 0,
+                    candidate_list_url: str = '', job_id: int = None,
+                    external_job_id: str = '') -> Task:
         """创建新任务"""
         conn = self._get_conn()
         try:
             now = datetime.now()
             
             # 获取job_id
-            job = self.get_job_by_name(job_name)
-            job_id = job.id if job else None
+            if job_id is None:
+                job = self.get_job_by_name(job_name)
+                job_id = job.id if job else None
             
             # AI配置快照
             ai_enabled = ai_config.get('enabled', False) if ai_config else False
             ai_api_key = ai_config.get('api_key', '') if ai_config else ''
             ai_match_desc = ai_config.get('match_description', '') if ai_config else ''
+            ai_config_snapshot = json.dumps(ai_config or {}, ensure_ascii=False)
             
             cursor = conn.execute('''
                 INSERT INTO tasks (
                     job_id, job_name, status,
-                    ai_enabled, ai_api_key, ai_match_description,
-                    download_dir, download_all_pages,
+                    ai_enabled, ai_api_key, ai_match_description, ai_config_snapshot,
+                    download_dir, download_all_pages, candidate_list_url,
                     total_candidates, current_page, total_pages,
                     created_at, updated_at
-                ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)
+                ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)
             ''', (
                 job_id, job_name,
-                1 if ai_enabled else 0, ai_api_key, ai_match_desc,
+                1 if ai_enabled else 0, ai_api_key, ai_match_desc, ai_config_snapshot,
                 download_dir, 1 if download_all_pages else 0,
+                candidate_list_url or '',
                 total_candidates, now, now
             ))
             
@@ -285,8 +398,10 @@ class Database:
             ai_enabled=ai_enabled,
             ai_api_key=ai_api_key,
             ai_match_description=ai_match_desc,
+            ai_config_snapshot=ai_config_snapshot,
             download_dir=download_dir,
             download_all_pages=download_all_pages,
+            candidate_list_url=candidate_list_url or '',
             total_candidates=total_candidates,
             created_at=now,
             updated_at=now
@@ -340,8 +455,9 @@ class Database:
             now = datetime.now()
             allowed_fields = [
                 'total_candidates', 'processed_count', 'success_count', 
-                'failed_count', 'ai_pass_count', 'ai_fail_count',
-                'current_page', 'total_pages', 'excel_path'
+                'downloaded_count', 'failed_count', 'ai_pass_count', 'ai_fail_count',
+                'rejected_count', 'current_page', 'total_pages', 'excel_path',
+                'current_candidate_id', 'candidate_list_url'
             ]
             
             updates = []
@@ -372,14 +488,19 @@ class Database:
             ai_enabled=bool(row['ai_enabled']),
             ai_api_key=row['ai_api_key'] or '',
             ai_match_description=row['ai_match_description'] or '',
+            ai_config_snapshot=row['ai_config_snapshot'] or '',
             download_dir=row['download_dir'] or '',
             download_all_pages=bool(row['download_all_pages']),
+            candidate_list_url=row['candidate_list_url'] or '',
+            current_candidate_id=row['current_candidate_id'] or '',
             total_candidates=row['total_candidates'],
             processed_count=row['processed_count'],
             success_count=row['success_count'],
+            downloaded_count=row['downloaded_count'] or 0,
             failed_count=row['failed_count'],
             ai_pass_count=row['ai_pass_count'],
             ai_fail_count=row['ai_fail_count'],
+            rejected_count=row['rejected_count'] or 0,
             current_page=row['current_page'],
             total_pages=row['total_pages'],
             excel_path=row['excel_path'] or '',
@@ -400,8 +521,10 @@ class Database:
             major = candidate.get('major', '')
             education = candidate.get('education', '')
             page_num = candidate.get('page', 1)
+            sort_index = candidate.get('sort_index', 0) or 0
             
-            ext_id = generate_candidate_external_id(name, school, major)
+            # 优先使用前程无忧候选人ID，拿不到时使用姓名+学校+专业hash
+            ext_id = candidate.get('external_id', '') or generate_candidate_external_id(name, school, major)
             
             # 尝试插入，如果已存在则忽略
             try:
@@ -409,9 +532,9 @@ class Database:
                     INSERT INTO task_candidates (
                         task_id, candidate_external_id,
                         name, school, major, education,
-                        page_num, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (task_id, ext_id, name, school, major, education, page_num, now, now))
+                        page_num, sort_index, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                ''', (task_id, ext_id, name, school, major, education, page_num, sort_index, now, now))
                 conn.commit()
             except sqlite3.IntegrityError:
                 pass  # 已存在，忽略
@@ -423,7 +546,9 @@ class Database:
                 school=school,
                 major=major,
                 education=education,
-                page_num=page_num
+                page_num=page_num,
+                sort_index=sort_index,
+                status='pending'
             )
         finally:
             conn.close()
@@ -441,17 +566,18 @@ class Database:
                 major = candidate.get('major', '')
                 education = candidate.get('education', '')
                 page_num = candidate.get('page', 1)
+                sort_index = candidate.get('sort_index', 0) or 0
                 
-                ext_id = generate_candidate_external_id(name, school, major)
+                ext_id = candidate.get('external_id', '') or generate_candidate_external_id(name, school, major)
                 
                 try:
                     conn.execute('''
                         INSERT INTO task_candidates (
                             task_id, candidate_external_id,
                             name, school, major, education,
-                            page_num, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (task_id, ext_id, name, school, major, education, page_num, now, now))
+                            page_num, sort_index, status, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                    ''', (task_id, ext_id, name, school, major, education, page_num, sort_index, now, now))
                     added += 1
                 except sqlite3.IntegrityError:
                     pass
@@ -480,10 +606,48 @@ class Database:
         conn = self._get_conn()
         try:
             rows = conn.execute(
-                "SELECT * FROM task_candidates WHERE task_id=? AND download_status='pending' ORDER BY page_num, id",
+                "SELECT * FROM task_candidates WHERE task_id=? AND status='pending' "
+                "ORDER BY page_num, sort_index, id",
                 (task_id,)
             ).fetchall()
             return [self._row_to_candidate(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_recoverable_candidates(self, task_id: int) -> List[TaskCandidate]:
+        """获取可恢复候选人（pending/processing/failed），已下载/已淘汰的跳过"""
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM task_candidates WHERE task_id=? AND status IN "
+                "('pending', 'processing', 'failed') ORDER BY page_num, sort_index, id",
+                (task_id,)
+            ).fetchall()
+            return [self._row_to_candidate(row) for row in rows]
+        finally:
+            conn.close()
+
+    def update_candidate_status(self, task_id: int, external_id: str, status: str,
+                                error_message: str = '', file_path: str = ''):
+        """更新候选人处理状态（pending/processing/ai_rejected/downloading/downloaded/failed）"""
+        conn = self._get_conn()
+        try:
+            now = datetime.now()
+            terminal = status in ('downloaded', 'ai_rejected', 'failed')
+            conn.execute('''
+                UPDATE task_candidates
+                SET status=?, download_status=?, file_path=?, error_message=?,
+                    processed_at=COALESCE(processed_at, ?), updated_at=?
+                WHERE task_id=? AND candidate_external_id=?
+            ''', (
+                status,
+                'success' if status == 'downloaded' else
+                ('skipped' if status == 'ai_rejected' else status),
+                file_path, error_message,
+                now if terminal else None,
+                now, task_id, external_id
+            ))
+            conn.commit()
         finally:
             conn.close()
     
@@ -498,6 +662,58 @@ class Database:
             return [self._row_to_candidate(row) for row in rows]
         finally:
             conn.close()
+
+    def get_candidates_history(self, external_ids: List[str] = None) -> dict:
+        """
+        跨任务获取候选人最新处理记录（用于刷新列表时显示历史状态）
+
+        只返回有明确结果/失败原因的记录：
+        - status IN (downloaded, ai_rejected, failed)
+        - 或 error_message 非空
+
+        Returns:
+            {candidate_external_id: {
+                'status', 'download_status', 'error_message', 'ai_reason',
+                'task_id', 'job_name', 'updated_at'
+            }}
+        """
+        conn = self._get_conn()
+        try:
+            sql = '''
+                SELECT tc.candidate_external_id AS ext_id,
+                       tc.status, tc.download_status,
+                       tc.error_message, tc.ai_reason,
+                       tc.task_id, tc.updated_at,
+                       t.job_name
+                FROM task_candidates tc
+                LEFT JOIN tasks t ON t.id = tc.task_id
+                WHERE (tc.status IN ('downloaded', 'ai_rejected', 'failed')
+                       OR tc.error_message IS NOT NULL AND tc.error_message != '')
+            '''
+            params: list = []
+            if external_ids:
+                placeholders = ','.join(['?' for _ in external_ids])
+                sql += f" AND tc.candidate_external_id IN ({placeholders})"
+                params = list(external_ids)
+
+            rows = conn.execute(sql + " ORDER BY tc.id DESC", params).fetchall()
+            history = {}
+            for row in rows:
+                ext_id = row['ext_id']
+                if ext_id in history:
+                    continue  # 只保留最新一条
+                history[ext_id] = {
+                    'status': row['status'],
+                    'download_status': row['download_status'],
+                    'error_message': row['error_message'] or '',
+                    'ai_reason': row['ai_reason'] or '',
+                    'task_id': row['task_id'],
+                    'job_name': row['job_name'] or '',
+                    'updated_at': row['updated_at'],
+                }
+            return history
+        finally:
+            conn.close()
     
     def update_candidate_ai_result(self, task_id: int, external_id: str, 
                                     ai_pass: bool, ai_reason: str, ai_score: float = 0.0):
@@ -507,9 +723,15 @@ class Database:
             now = datetime.now()
             conn.execute('''
                 UPDATE task_candidates 
-                SET ai_processed=1, ai_pass=?, ai_reason=?, ai_score=?, updated_at=?
+                SET ai_processed=1, ai_pass=?, ai_reason=?, ai_score=?, 
+                    status=CASE WHEN ?=0 THEN 'ai_rejected' ELSE status END,
+                    download_status=CASE WHEN ?=0 THEN 'skipped' ELSE download_status END,
+                    processed_at=CASE WHEN ?=0 THEN COALESCE(processed_at, ?) ELSE processed_at END,
+                    updated_at=?
                 WHERE task_id=? AND candidate_external_id=?
-            ''', (1 if ai_pass else 0, ai_reason, ai_score, now, task_id, external_id))
+            ''', (1 if ai_pass else 0, ai_reason, ai_score,
+                  1 if ai_pass else 0, 1 if ai_pass else 0, 1 if ai_pass else 0,
+                  now, now, task_id, external_id))
             conn.commit()
         finally:
             conn.close()
@@ -520,11 +742,22 @@ class Database:
         conn = self._get_conn()
         try:
             now = datetime.now()
+            mapped = {
+                'success': 'downloaded',
+                'skipped': 'ai_rejected',
+                'failed': 'failed',
+                'downloading': 'downloading',
+            }.get(status, status)
             conn.execute('''
                 UPDATE task_candidates 
-                SET download_status=?, file_path=?, error_message=?, updated_at=?
+                SET download_status=?, file_path=?, error_message=?, status=?,
+                    processed_at=COALESCE(processed_at, ?), updated_at=?
                 WHERE task_id=? AND candidate_external_id=?
-            ''', (status, file_path, error_message, now, task_id, external_id))
+            ''', (
+                status, file_path, error_message, mapped,
+                now if mapped in ('downloaded', 'ai_rejected', 'failed') else None,
+                now, task_id, external_id
+            ))
             conn.commit()
         finally:
             conn.close()
@@ -540,6 +773,8 @@ class Database:
             major=row['major'] or '',
             education=row['education'] or '',
             page_num=row['page_num'],
+            sort_index=row['sort_index'] or 0,
+            status=row['status'] or 'pending',
             ai_processed=bool(row['ai_processed']),
             ai_pass=bool(row['ai_pass']) if row['ai_pass'] is not None else None,
             ai_score=row['ai_score'] or 0.0,
@@ -548,18 +783,21 @@ class Database:
             file_path=row['file_path'] or '',
             error_message=row['error_message'] or '',
             created_at=row['created_at'],
-            updated_at=row['updated_at']
+            updated_at=row['updated_at'],
+            processed_at=row['processed_at']
         )
     
     # ==================== Task Logs ====================
     
-    def add_task_log(self, task_id: int, level: str, message: str):
-        """添加任务日志"""
+    def add_task_log(self, task_id: int, level: str, message: str,
+                     event_type: str = 'task_log', candidate_id: int = None):
+        """添加任务日志（event_type 见改造方案：task_started/task_paused/task_resumed/...）"""
         conn = self._get_conn()
         try:
             conn.execute(
-                "INSERT INTO task_logs (task_id, level, message, created_at) VALUES (?, ?, ?, ?)",
-                (task_id, level, message, datetime.now())
+                "INSERT INTO task_logs (task_id, event_type, candidate_id, level, message, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (task_id, event_type, candidate_id, level, message, datetime.now())
             )
             conn.commit()
         finally:
@@ -576,6 +814,8 @@ class Database:
             return [TaskLog(
                 id=row['id'],
                 task_id=row['task_id'],
+                event_type=row['event_type'] or 'task_log',
+                candidate_id=row['candidate_id'],
                 level=row['level'],
                 message=row['message'],
                 created_at=row['created_at']
@@ -596,7 +836,9 @@ class Database:
                     SUM(CASE WHEN download_status='failed' THEN 1 ELSE 0 END) as failed,
                     SUM(CASE WHEN download_status='skipped' THEN 1 ELSE 0 END) as skipped,
                     SUM(CASE WHEN ai_processed=1 AND ai_pass=1 THEN 1 ELSE 0 END) as ai_pass,
-                    SUM(CASE WHEN ai_processed=1 AND ai_pass=0 THEN 1 ELSE 0 END) as ai_fail
+                    SUM(CASE WHEN ai_processed=1 AND ai_pass=0 THEN 1 ELSE 0 END) as ai_fail,
+                    SUM(CASE WHEN status='pending' OR status='processing' THEN 1 ELSE 0 END) as remaining,
+                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed_status
                 FROM task_candidates WHERE task_id=?
             ''', (task_id,)).fetchone()
             
@@ -606,7 +848,9 @@ class Database:
                 'failed': row['failed'] or 0,
                 'skipped': row['skipped'] or 0,
                 'ai_pass': row['ai_pass'] or 0,
-                'ai_fail': row['ai_fail'] or 0
+                'ai_fail': row['ai_fail'] or 0,
+                'remaining': row['remaining'] or 0,
+                'failed_status': row['failed_status'] or 0,
             }
         finally:
             conn.close()

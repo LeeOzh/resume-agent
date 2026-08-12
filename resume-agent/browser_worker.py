@@ -17,8 +17,8 @@ sys.path.insert(0, str(BASE_DIR))
 
 def run(switch_job=''):
     """执行浏览器连接和候选人获取"""
-    from playwright.sync_api import sync_playwright
-    from config import CHROME_DEBUG_PORT
+    from browser.browser_manager import BrowserManager
+    from browser.page_detector import PageDetector, PageType, LoginStatus
 
     result = {
         'success': False,
@@ -26,42 +26,36 @@ def run(switch_job=''):
         'positions': [],
         'active_position': '',
         'page_title': '',
+        'page_url': '',
+        'page_type': '',
+        'login_status': '',
         'current_page': 1,
         'error': ''
     }
 
     try:
-        # 检测端口
-        import socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2)
-        port_open = sock.connect_ex(('127.0.0.1', CHROME_DEBUG_PORT)) == 0
-        sock.close()
-
-        if not port_open:
-            result['error'] = f'调试端口 {CHROME_DEBUG_PORT} 未开放，Chrome 自动启动可能失败，请手动运行 启动Chrome.bat'
+        # 统一由 BrowserManager 启动/连接
+        manager = BrowserManager()
+        if not manager.initialize(auto_launch=True):
+            result['error'] = manager.last_error or '浏览器连接失败'
             return result
 
-        # 连接浏览器
-        pw = sync_playwright().start()
-        browser = pw.chromium.connect_over_cdp(f'http://localhost:{CHROME_DEBUG_PORT}')
-
-        contexts = browser.contexts
-        if not contexts:
-            result['error'] = '未找到浏览器上下文'
-            pw.stop()
+        page = manager.get_page()
+        if not page:
+            result['error'] = '未找到可用页面'
+            manager.close()
             return result
-
-        context = contexts[0]
-        pages = context.pages
-
-        if not pages:
-            page = context.new_page()
-        else:
-            page = pages[-1]
 
         result['page_title'] = page.title()
         result['page_url'] = page.url
+        result['page_type'] = PageDetector.detect(page=page)
+        result['login_status'] = PageDetector.is_logged_in(page=page)
+
+        # 登录失效时禁止候选人自动化操作（方案第 9 节）
+        if result['login_status'] == LoginStatus.EXPIRED:
+            result['error'] = '前程无忧登录状态已失效，请重新登录'
+            manager.close()
+            return result
 
         # 获取职位列表（使用menu-item_content_active判断当前选中）
         try:
@@ -248,7 +242,7 @@ def run(switch_job=''):
         result['candidates'] = all_candidates
         result['success'] = True
 
-        pw.stop()
+        manager.close()
 
     except Exception as e:
         result['error'] = str(e)

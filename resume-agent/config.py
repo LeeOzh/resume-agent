@@ -21,8 +21,12 @@ CHROME_DEBUG_PORT = 9222
 # Chrome Remote Debugging 地址
 CDP_ENDPOINT = f"http://localhost:{CHROME_DEBUG_PORT}"
 
-# Chrome 用户数据目录
-CHROME_PROFILE_DIR = Path("C:/chrome-agent")
+# Chrome 用户数据目录（改造方案第 4 节：独立 Profile，保存登录 Cookie）
+try:
+    from browser.browser_config import get_profile_dir
+    CHROME_PROFILE_DIR = get_profile_dir()
+except Exception:
+    CHROME_PROFILE_DIR = Path(os.environ.get('LOCALAPPDATA', 'C:/')) / "ResumeAgent" / "chrome-profile"
 
 # 下载路径
 DOWNLOAD_PATH = BASE_DIR / "output" / "resumes"

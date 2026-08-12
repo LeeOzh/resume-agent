@@ -17,12 +17,14 @@ a = Analysis(
     binaries=openai_binaries + pyqt6_binaries,
     datas=openai_datas + pyqt6_datas + [
         ('gui/resources/styles/*.qss', 'gui/resources/styles'),
+        ('gui/resources/icons/*.svg', 'gui/resources/icons'),
         ('browser_worker.py', '.'),
         ('download_worker.py', '.'),
         ('config.py', '.'),
         ('browser/*.py', 'browser'),
         ('crawler/*.py', 'crawler'),
         ('db/*.py', 'db'),
+        ('task/*.py', 'task'),
         ('main.py', '.'),
     ],
     hiddenimports=[
