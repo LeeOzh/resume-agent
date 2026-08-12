@@ -21,7 +21,7 @@ from PyQt6.QtGui import QAction, QFont, QColor, QIcon, QShortcut, QKeySequence
 from qfluentwidgets import (
     FluentIcon, PrimaryPushButton, PushButton, ComboBox, TableWidget,
     CheckBox as FluentCheckBox, LineEdit as FluentLineEdit,
-    InfoBadge, InfoLevel, setTheme, Theme, setThemeColor,
+    InfoBadge, InfoLevel, IndeterminateProgressBar, setTheme, Theme, setThemeColor,
 )
 
 # 获取基础目录
@@ -1797,6 +1797,12 @@ class AIConfigDialog(QDialog):
         gen_group.setLayout(gen_layout)
         layout.addWidget(gen_group)
 
+        # 加载指示条（测试连接/生成描述时显示）
+        self.loading_bar = IndeterminateProgressBar(self)
+        self.loading_bar.setFixedHeight(3)
+        self.loading_bar.setVisible(False)
+        layout.addWidget(self.loading_bar)
+
         button_layout = QHBoxLayout()
         self.ok_btn = PrimaryPushButton("确定")
         self.ok_btn.clicked.connect(self.accept)
@@ -1878,22 +1884,29 @@ class AIConfigDialog(QDialog):
             self.test_result_label.setStyleSheet("color: #D97706;")
             return
         self.test_btn.setEnabled(False)
+        self.gen_btn.setEnabled(False)
         self.test_result_label.setText("测试中...")
         self.test_result_label.setStyleSheet("color: #2563EB;")
+        self.loading_bar.setVisible(True)
+        self.loading_bar.start()
         try:
             text = self._call_llm(
                 api_key,
                 [{"role": "user", "content": "只回复两个字：正常"}],
-                max_tokens=10,
+                max_tokens=100,
                 temperature=0,
             )
-            self.test_result_label.setText(f"连接成功 ✓（{text[:20]}）")
+            tip = f"（{text[:20]}）" if text else "（API 已响应）"
+            self.test_result_label.setText(f"连接成功 ✓{tip}")
             self.test_result_label.setStyleSheet("color: #16A34A;")
         except Exception as e:
             self.test_result_label.setText(f"连接失败: {e}")
             self.test_result_label.setStyleSheet("color: #DC2626;")
         finally:
             self.test_btn.setEnabled(True)
+            self.gen_btn.setEnabled(True)
+            self.loading_bar.stop()
+            self.loading_bar.setVisible(False)
 
     def generate_description(self):
         """根据原始要求调用 AI 生成专业匹配描述，直接新增一行"""
@@ -1908,8 +1921,11 @@ class AIConfigDialog(QDialog):
             self.gen_result_label.setStyleSheet("color: #D97706;")
             return
         self.gen_btn.setEnabled(False)
+        self.test_btn.setEnabled(False)
         self.gen_result_label.setText("生成中...")
         self.gen_result_label.setStyleSheet("color: #2563EB;")
+        self.loading_bar.setVisible(True)
+        self.loading_bar.start()
         try:
             prompt = (
                 "你是资深招聘HR。请根据以下原始岗位要求，生成一段专业、结构清晰、便于AI筛选简历的岗位匹配描述。"
@@ -1922,9 +1938,13 @@ class AIConfigDialog(QDialog):
                     {"role": "system", "content": "你是简历筛选专家，只输出岗位匹配描述本身。"},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=400,
+                max_tokens=2000,
                 temperature=0.3,
             )
+            if not text:
+                self.gen_result_label.setText("模型未返回内容（推理过长），请重试")
+                self.gen_result_label.setStyleSheet("color: #DC2626;")
+                return
             # 新增一条匹配描述（岗位名预填当前岗位，便于直接使用）
             job_name = ""
             if self.parent() and hasattr(self.parent(), "current_job"):
@@ -1939,6 +1959,9 @@ class AIConfigDialog(QDialog):
             self.gen_result_label.setStyleSheet("color: #DC2626;")
         finally:
             self.gen_btn.setEnabled(True)
+            self.test_btn.setEnabled(True)
+            self.loading_bar.stop()
+            self.loading_bar.setVisible(False)
 
     def accept(self):
         self.save_config()
