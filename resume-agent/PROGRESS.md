@@ -78,6 +78,20 @@ resume-agent/
 
 ## 更新日志
 
+### 2026-08-12（FluentUI 重构 · PyQt6-Fluent-Widgets）
+
+按《FluentUI重构方案.md》实施，业务逻辑零改动：
+
+- **Phase 1**：接入 PyQt6-Fluent-Widgets 1.11.3；主窗口按钮
+  （PrimaryPushButton/PushButton + FluentIcon）、下拉框（ComboBox）、
+  候选人表格（TableWidget）、勾选框、输入框全部替换为 Fluent 组件；
+  主题接入 setTheme/setThemeColor
+- **Phase 2**：状态栏改为 InfoBadge 徽标（浏览器/AI/任务三级颜色）；
+  QSS 对齐 Fluent 调色板（浅色 #F3F3F3 + 白色卡片，暗色 #202020 + #2B2B2B）
+- **Phase 3/4**：AI 配置对话框组件同步 Fluent 化（测试连接/生成描述保留）；
+  图标统一 FluentIcon
+- **Phase 5**：回归验证（用户实测），本阶段不打包
+
 ### 2026-08-12（UI 现代化改造 · PyQt6 深度美化）
 
 按《UI现代化改造方案.md》分阶段实施：
