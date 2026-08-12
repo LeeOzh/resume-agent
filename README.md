@@ -27,12 +27,21 @@
 | PyQt6 GUI 界面 | ✅ 完成 | 候选人表格、控制面板、操作日志、学校名单过滤 |
 | SQLite 持久化 | ✅ 完成 | 任务/候选人/日志入库，候选人状态实时写入，支持任务恢复 |
 | 学校名单可配置 | ✅ 完成 | `school_filter_config.json` 统一配置，兼容旧路径文件 |
+| 浏览器状态管理 | ✅ 完成 | BrowserManager 状态机/健康检查/断线自动重连（3次） |
+| 页面/登录检测 | ✅ 完成 | PageDetector 识别登录页/候选人列表/岗位，登录失效自动暂停 |
+| 候选人历史记录 | ✅ 完成 | 刷新时关联历史状态，已下载/AI淘汰自动过滤，失败显示记录 |
+| 附件检测增强 | ✅ 完成 | 12秒轮询 + 多选择器 + 详情页同页跳转兼容 |
+| FluentUI 重构 | ✅ 完成 | PyQt6-Fluent-Widgets，Fluent 组件/徽标/明暗主题 |
+| AI 配置增强 | ✅ 完成 | 测试连接、AI 生成专业描述、下载时选择匹配描述 |
+| Excel AI 理由 | ✅ 完成 | 导出表含 AI 评估结果与理由 |
 
 ## 技术架构
 
 ### 技术栈
 
 - Python 3.11+
+- PyQt6 (GUI)
+- PyQt6-Fluent-Widgets (FluentUI 组件库)
 - Playwright (浏览器自动化)
 - pandas + openpyxl (Excel 输出)
 - openai SDK (MiMo API 调用)
@@ -42,13 +51,22 @@
 
 ```
 resume-agent/
-├── main.py              # 主程序
+├── main_gui.py          # GUI 入口（推荐）
+├── main.py              # CLI 入口
 ├── config.py            # 配置文件（含 AI 配置持久化）
+├── browser_worker.py    # 浏览器操作子进程
+├── download_worker.py   # 下载操作子进程
+├── runtime_lock.py      # 实例锁（防止多实例同时自动化）
 ├── browser/
-│   └── chrome.py        # Chrome CDP 连接
+│   ├── browser_manager.py  # Chrome 生命周期管理（状态机/重连）
+│   ├── page_detector.py    # 页面/登录状态检测
+│   └── chrome.py           # 兼容层
 ├── crawler/
 │   └── candidate.py     # 候选人解析
-├── build.spec           # PyInstaller 打包配置
+├── task/                # TaskManager（任务生命周期/候选人状态机）
+├── db/                  # SQLite（jobs/tasks/task_candidates/task_logs）
+├── gui/                 # PyQt6 FluentUI 界面
+├── build_gui.spec       # PyInstaller 打包配置（GUI）
 ├── requirements.txt     # 依赖列表
 └── README.md            # 项目说明
 ```
@@ -116,33 +134,48 @@ def evaluate_resume(resume_text, match_description, api_key):
 ```bash
 pip install -r requirements.txt
 playwright install chromium
-python main.py
+python main_gui.py
 ```
 
 ### 打包为 exe
 
 ```bash
-pyinstaller build.spec
+pyinstaller build_gui.spec
 ```
 
 ### 使用步骤
 
-1. 运行程序，程序会自动启动 Chrome 调试模式（用户数据目录 `C:\chrome-agent`）
+1. 运行程序，程序会自动启动 Chrome 调试模式（独立用户数据目录
+   `%LOCALAPPDATA%\ResumeAgent\chrome-profile`，保存登录会话）
    - 如需手动启动 Chrome 调试模式：
    ```
-   chrome.exe --remote-debugging-port=9222 --user-data-dir=C:\chrome-agent
+   chrome.exe --remote-debugging-port=9222 --user-data-dir=%LOCALAPPDATA%\ResumeAgent\chrome-profile
    ```
 
 2. 在打开的 Chrome 中登录前程无忧，进入候选人列表页面
 
-3. 程序自动刷新候选人列表后，选择操作：
-   - `1` - 自动下载所有简历（含职位选择 + AI 筛选）
-   - `2` - 下载指定简历
-   - `5` - AI 简历筛选配置
-   - `0` - 测试滚动功能（调试用）
-   - `9` - 测试分页功能（调试用）
+3. GUI 操作：
+   - 顶部「刷新」：获取岗位/候选人（候选人默认读数据库，刷新才抓取最新）
+   - 顶部「AI配置」：API Key、测试连接、岗位匹配描述、AI 生成专业描述
+   - 顶部「暗色/亮色」：主题切换；「关于」：版本信息
+   - 下载控制区：选择匹配描述（自动匹配/指定岗位/不使用AI）、开始/暂停/继续/中断下载
+   - 快捷键：F5 刷新、Ctrl+Enter 开始下载
 
 ## 更新日志
+
+### 2026-08-12
+
+- FluentUI 重构：接入 PyQt6-Fluent-Widgets，按钮/下拉框/表格/徽标 Fluent 化，
+  头部操作区替代菜单栏，明暗主题
+- 修复 AI 评估静默失败（MiMo 推理模型 max_tokens 不足导致全部默认通过），
+  加大额度 + 失败重试，评估理由落库并导出 Excel
+- AI 配置增强：测试连接（loading 交互）、AI 生成专业描述（直接新增一条）、
+  下载时选择岗位匹配描述
+- 浏览器状态管理：BrowserManager 状态机/健康检查/断线重连，登录失效自动暂停
+- 候选人历史记录：刷新自动过滤已下载/AI淘汰，失败保留并显示原因
+- 附件检测增强：12 秒轮询、多选择器、详情页同页跳转兼容、失败诊断
+- 实例锁 runtime.lock：防止多实例同时执行自动化
+- 双轨架构（React+FastAPI）已存档到分支 `refactor/react-architecture`
 
 ### 2026-08-11
 
