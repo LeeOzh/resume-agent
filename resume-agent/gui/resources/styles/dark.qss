@@ -16,25 +16,12 @@ QMainWindow {
 
 QFrame#windowContainer {
     background-color: #0F172A;
-    border: 1px solid #1E293B;
-    border-radius: 12px;
-}
-
-QFrame#windowContainer[maximized="true"] {
-    border-radius: 0px;
     border: none;
 }
 
 QWidget#titleBar {
     background-color: #0F172A;
-    border-top-left-radius: 12px;
-    border-top-right-radius: 12px;
     border-bottom: 1px solid #1E293B;
-}
-
-QFrame#windowContainer[maximized="true"] QWidget#titleBar {
-    border-top-left-radius: 0px;
-    border-top-right-radius: 0px;
 }
 
 QLabel#titleLabel {

@@ -15,29 +15,16 @@ QMainWindow {
     background-color: #EEF2F7;
 }
 
-/* 无边框窗口容器（圆角 + 阴影由代码层 QGraphicsDropShadowEffect 提供） */
+/* 无边框窗口容器：铺满窗口，无外层边距/阴影/圆角 */
 QFrame#windowContainer {
     background-color: #FFFFFF;
-    border: 1px solid #E2E8F0;
-    border-radius: 12px;
-}
-
-QFrame#windowContainer[maximized="true"] {
-    border-radius: 0px;
     border: none;
 }
 
 /* ---------- 标题栏 ---------- */
 QWidget#titleBar {
     background-color: #FFFFFF;
-    border-top-left-radius: 12px;
-    border-top-right-radius: 12px;
     border-bottom: 1px solid #EEF2F7;
-}
-
-QFrame#windowContainer[maximized="true"] QWidget#titleBar {
-    border-top-left-radius: 0px;
-    border-top-right-radius: 0px;
 }
 
 QLabel#titleLabel {

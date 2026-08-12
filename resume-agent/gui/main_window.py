@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QToolBar, QStatusBar, QMenuBar, QHeaderView, QCheckBox,
     QPushButton, QLabel, QGroupBox, QGridLayout,
     QLineEdit, QDialog, QMessageBox, QProgressBar, QApplication,
-    QFileDialog, QComboBox, QFrame, QGraphicsDropShadowEffect, QScrollArea
+    QFileDialog, QComboBox, QFrame, QScrollArea
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QEvent, QPropertyAnimation, QPoint
 from PyQt6.QtGui import QAction, QFont, QColor, QIcon, QShortcut, QKeySequence
@@ -126,7 +126,7 @@ class MainWindow(QMainWindow):
         self.pause_event = multiprocessing.Event()
 
         self.setWindowTitle("AI 简历批量初筛与下载助手")
-        self.setMinimumSize(1200, 800)
+        self.setMinimumSize(960, 620)
 
         # 无边框窗口（圆角卡片 + 纯色背景；不使用 WA_TranslucentBackground，
         # 避免部分机器上透明区域渲染为黑色/不可点击）
@@ -250,13 +250,13 @@ class MainWindow(QMainWindow):
             return False
 
     def setup_ui(self):
-        # 透明根窗口：留边距让容器阴影可见（无边框窗口）
+        # 根窗口：容器铺满，无外层边距（避免“窗口外背景层”与缩放边缘错位）
         root_widget = QWidget()
         self._root_layout = QVBoxLayout(root_widget)
-        self._root_layout.setContentsMargins(16, 16, 16, 16)
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
         self.setCentralWidget(root_widget)
 
-        # 圆角容器：标题栏 + 菜单 + 工具栏 + 内容 + 状态栏
+        # 容器：标题栏 + 菜单 + 工具栏 + 内容 + 状态栏
         from gui.widgets.title_bar import TitleBar
         self.window_container = QFrame()
         self.window_container.setObjectName("windowContainer")
@@ -270,13 +270,6 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self._container_layout.addWidget(central_widget, 1)
         self._root_layout.addWidget(self.window_container)
-
-        # 窗口阴影
-        self.window_shadow = QGraphicsDropShadowEffect(self.window_container)
-        self.window_shadow.setBlurRadius(36)
-        self.window_shadow.setOffset(0, 8)
-        self.window_shadow.setColor(QColor(15, 23, 42, 70))
-        self.window_container.setGraphicsEffect(self.window_shadow)
 
         main_layout = QHBoxLayout(central_widget)
         main_layout.setContentsMargins(16, 16, 16, 16)
@@ -561,18 +554,12 @@ class MainWindow(QMainWindow):
     # ==================== 无边框窗口 ====================
 
     def _update_window_chrome(self):
-        """最大化时去掉圆角/阴影/边距，还原时恢复"""
+        """窗口状态变化处理（无外阴影/边距；仅同步容器状态与图标）"""
         maximized = self.isMaximized()
         self.window_container.setProperty("maximized", "true" if maximized else "false")
         style = self.window_container.style()
         style.unpolish(self.window_container)
         style.polish(self.window_container)
-        if maximized:
-            self.window_container.setGraphicsEffect(None)
-            self._root_layout.setContentsMargins(0, 0, 0, 0)
-        else:
-            self.window_container.setGraphicsEffect(self.window_shadow)
-            self._root_layout.setContentsMargins(16, 16, 16, 16)
 
     def changeEvent(self, event):
         super().changeEvent(event)
@@ -605,19 +592,9 @@ class MainWindow(QMainWindow):
                     x = ctypes.c_short(msg.lParam & 0xFFFF).value
                     y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
 
-                    # 标题栏区域：返回 HTCAPTION 交给系统原生拖动（按钮区域除外）
-                    local = self.mapFromGlobal(QPoint(x, y))
-                    tb = getattr(self, 'title_bar', None)
-                    if tb is not None and tb.geometry().contains(local):
-                        tb_local = tb.mapFromGlobal(QPoint(x, y))
-                        under = tb.childAt(tb_local)
-                        if under not in (getattr(tb, 'min_btn', None),
-                                         getattr(tb, 'max_btn', None),
-                                         getattr(tb, 'close_btn', None)):
-                            return True, 2   # HTCAPTION
-
+                    # 边缘缩放优先（窗口边缘 8px 内可拖拽调整大小）
                     g = self.geometry()
-                    border = 6
+                    border = 8
                     left = x <= g.left() + border
                     right = x >= g.right() - border
                     top = y <= g.top() + border
@@ -638,6 +615,17 @@ class MainWindow(QMainWindow):
                         return True, 12   # HTTOP
                     if bottom:
                         return True, 15   # HTBOTTOM
+
+                    # 标题栏区域：返回 HTCAPTION 交给系统原生拖动（按钮区域除外）
+                    local = self.mapFromGlobal(QPoint(x, y))
+                    tb = getattr(self, 'title_bar', None)
+                    if tb is not None and local.y() > border and tb.geometry().contains(local):
+                        tb_local = tb.mapFromGlobal(QPoint(x, y))
+                        under = tb.childAt(tb_local)
+                        if under not in (getattr(tb, 'min_btn', None),
+                                         getattr(tb, 'max_btn', None),
+                                         getattr(tb, 'close_btn', None)):
+                            return True, 2   # HTCAPTION
             return False, 0
         except Exception:
             return False, 0
