@@ -342,6 +342,11 @@ QLineEdit:disabled {
     color: #94A3B8;
 }
 
+/* 表格内嵌输入框：减小上下 padding，避免被行高压扁导致文字不可见 */
+QTableWidget QLineEdit {
+    padding: 3px 8px;
+}
+
 QComboBox {
     padding: 7px 10px;
     border: 1px solid #E2E8F0;

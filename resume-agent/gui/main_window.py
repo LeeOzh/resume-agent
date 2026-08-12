@@ -1846,6 +1846,10 @@ class AIConfigDialog(QDialog):
         self.desc_table.setHorizontalHeaderLabels(["岗位名称", "匹配描述"])
         self.desc_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.desc_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        # 行高足够容纳输入框（QSS padding 7px 会把行内输入框压扁、文字不可见）
+        self.desc_table.verticalHeader().setVisible(False)
+        self.desc_table.verticalHeader().setDefaultSectionSize(40)
+        self.desc_table.setShowGrid(False)
         desc_layout.addWidget(self.desc_table)
 
         btn_layout = QHBoxLayout()
@@ -1978,20 +1982,15 @@ class AIConfigDialog(QDialog):
             self.test_btn.setEnabled(True)
 
     def generate_description(self):
-        """根据原始要求调用 AI 生成专业匹配描述，填入选中行"""
+        """根据原始要求调用 AI 生成专业匹配描述，直接新增一行"""
         raw = self.gen_input.text().strip()
         api_key = self.api_key_edit.text().strip()
-        row = self.desc_table.currentRow()
         if not raw:
             self.gen_result_label.setText("请先输入原始要求")
             self.gen_result_label.setStyleSheet("color: #D97706;")
             return
         if not api_key:
             self.gen_result_label.setText("请先输入 API Key")
-            self.gen_result_label.setStyleSheet("color: #D97706;")
-            return
-        if row < 0:
-            self.gen_result_label.setText("请先在列表选择/添加一行")
             self.gen_result_label.setStyleSheet("color: #D97706;")
             return
         self.gen_btn.setEnabled(False)
@@ -2012,10 +2011,14 @@ class AIConfigDialog(QDialog):
                 max_tokens=400,
                 temperature=0.3,
             )
-            desc_w = self.desc_table.cellWidget(row, 1)
-            if desc_w:
-                desc_w.setText(text)
-            self.gen_result_label.setText("已生成并填入选中行 ✓")
+            # 新增一条匹配描述（岗位名预填当前岗位，便于直接使用）
+            job_name = ""
+            if self.parent() and hasattr(self.parent(), "current_job"):
+                job_name = self.parent().current_job or ""
+            row = self._add_row(job_name, text)
+            self.desc_table.selectRow(row)
+            self.desc_table.scrollToBottom()
+            self.gen_result_label.setText("已生成并新增一条匹配描述 ✓")
             self.gen_result_label.setStyleSheet("color: #16A34A;")
         except Exception as e:
             self.gen_result_label.setText(f"生成失败: {e}")
