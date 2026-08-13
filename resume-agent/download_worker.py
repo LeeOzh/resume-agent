@@ -79,55 +79,6 @@ def run(candidates, download_dir, job_name='', ai_config=None,
         except Exception:
             return None
 
-    def persist_candidate(candidate, page_num, download_result):
-        """将候选人处理结果写入数据库（每个候选人立即保存）"""
-        if not tm or not task_id:
-            return
-        try:
-            name = candidate.get('name', '')
-            school = candidate.get('school', '') or ''
-            major = candidate.get('major', '') or ''
-            education = candidate.get('education', '') or ''
-            ext_id = candidate_ext_id(candidate)
-            tm.upsert_candidate(task_id, {
-                'external_id': ext_id,
-                'name': name,
-                'school': school,
-                'major': major,
-                'education': education,
-                'page': page_num,
-                'sort_index': candidate.get('sort_index', 0),
-            })
-            if download_result.get('ai_pass') is not None:
-                tm.save_ai_result(
-                    task_id, ext_id,
-                    ai_pass=bool(download_result.get('ai_pass')),
-                    ai_reason=download_result.get('ai_reason', '') or '',
-                )
-            if download_result.get('success'):
-                tm.mark_candidate_downloaded(
-                    task_id, ext_id,
-                    file_path=download_result.get('file_path', '') or '',
-                )
-            elif download_result.get('ai_pass') is False:
-                pass  # save_ai_result 已把状态置为 ai_rejected
-            else:
-                tm.mark_candidate_failed(
-                    task_id, ext_id,
-                    error=download_result.get('error', '') or '',
-                )
-        except Exception:
-            pass
-
-    def update_task_progress(**stats):
-        """更新任务进度"""
-        if not tm or not task_id:
-            return
-        try:
-            tm.update_progress(task_id, **stats)
-        except Exception:
-            pass
-
     result = {
         'success': False,
         'results': [],
@@ -151,7 +102,7 @@ def run(candidates, download_dir, job_name='', ai_config=None,
 
     try:
         from browser.browser_manager import BrowserManager
-        from browser.page_detector import PageDetector, LoginStatus
+        from browser.page_detector import PageDetector, LoginStatus, PageType
 
         # 统一由 BrowserManager 启动/连接（方案第 3 节）
         manager = BrowserManager()
@@ -186,12 +137,25 @@ def run(candidates, download_dir, job_name='', ai_config=None,
             context = manager.context
             return page is not None and context is not None
 
+        def check_page_ready():
+            """单次 evaluate 校验页面类型与登录状态（问题8：合并健康/登录/页面检查）"""
+            try:
+                page_type = PageDetector.detect(page=page)
+            except Exception:
+                return 'error'
+            if page_type == PageType.LOGIN_PAGE:
+                return 'expired'
+            if page_type not in (PageType.CANDIDATE_LIST_PAGE, PageType.JOB_LIST_PAGE):
+                return 'drifted'
+            return 'ok'
+
         # 创建下载目录
         download_path = Path(download_dir)
         download_path.mkdir(parents=True, exist_ok=True)
 
         all_results = []
         page_num = 1
+        real_total_pages = 1
         global_index = 0
         processed_count = base_counters['processed']
         success_count = base_counters['success']
@@ -211,52 +175,78 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                 ai_pass_count += 1
             elif download_result.get('ai_pass') is False:
                 ai_fail_count += 1
-            persist_candidate(candidate, page_no, download_result)
-            update_task_progress(
-                processed_count=processed_count,
-                success_count=success_count,
-                failed_count=failed_count,
-                ai_pass_count=ai_pass_count,
-                ai_fail_count=ai_fail_count,
-                current_page=page_num,
-                total_pages=page_num,
-            )
+            # 单事务写入候选人结果 + 任务进度（问题11）；total_pages 用真实总页数（问题3）
+            if tm and task_id:
+                try:
+                    tm.save_candidate_result(
+                        task_id, candidate, page_no, download_result,
+                        progress={
+                            'processed_count': processed_count,
+                            'success_count': success_count,
+                            'failed_count': failed_count,
+                            'ai_pass_count': ai_pass_count,
+                            'ai_fail_count': ai_fail_count,
+                            'current_page': page_num,
+                            'total_pages': real_total_pages,
+                        },
+                    )
+                except Exception:
+                    pass
 
-        if download_all_pages:
-            # 分页下载模式
-            while not is_stopped():
-                # 收集当前页候选人（含学校/专业/学历信息）
-                if not ensure_browser_ready() or not refresh_page():
-                    result['error'] = '浏览器断开且自动重连失败，任务已暂停'
-                    result['paused'] = True
-                    break
-                if PageDetector.is_logged_in(page=page) == LoginStatus.EXPIRED:
-                    result['error'] = '前程无忧登录状态已失效，任务已暂停，请重新登录后继续'
-                    result['login_expired'] = True
-                    break
-                current_candidates = collect_all_candidates_with_scroll(page)
-                if not current_candidates:
-                    break
+        def scroll_collect_and_process():
+            """边滚动边收集并处理当前页候选人（问题2：避免回顶后 DOM 回收导致漏人）"""
+            nonlocal global_index
+            seen = set()
+            no_new_count = 0
 
-                # 滚动回顶部
-                page.keyboard.press('Home')
-                time.sleep(1)
+            try:
+                page.mouse.move(600, 400)
+                time.sleep(0.3)
+            except Exception:
+                pass
 
-                # 逐个下载当前页
-                for cand in current_candidates:
-                    if is_stopped():
-                        break
-                    if is_pause_requested():
-                        break
+            for _round in range(100):
+                if is_stopped() or is_pause_requested():
+                    return False
 
-                    if not ensure_browser_ready() or not refresh_page():
+                current = collect_current_candidates(page)
+                if current is None:
+                    # 浏览器可能断开：重连一次后重试
+                    if not (ensure_browser_ready() and refresh_page()):
                         result['error'] = '浏览器断开且自动重连失败，任务已暂停'
                         result['paused'] = True
-                        break
-                    if PageDetector.is_logged_in(page=page) == LoginStatus.EXPIRED:
+                        return False
+                    current = collect_current_candidates(page)
+                    if current is None:
+                        result['error'] = '页面读取失败，任务已暂停'
+                        result['paused'] = True
+                        return False
+
+                new_count = 0
+                for cand in current:
+                    if is_stopped() or is_pause_requested():
+                        return False
+                    name = cand.get('name', '')
+                    if not name or name in seen:
+                        continue
+                    seen.add(name)
+                    new_count += 1
+
+                    # 页面/登录状态校验（单次 evaluate，问题8）
+                    status = check_page_ready()
+                    if status == 'expired':
                         result['error'] = '前程无忧登录状态已失效，任务已暂停，请重新登录后继续'
                         result['login_expired'] = True
-                        break
+                        return False
+                    if status == 'drifted':
+                        result['error'] = '页面已离开候选人列表，任务已暂停'
+                        result['paused'] = True
+                        return False
+                    if status == 'error':
+                        if not (ensure_browser_ready() and refresh_page()):
+                            result['error'] = '浏览器断开且自动重连失败，任务已暂停'
+                            result['paused'] = True
+                            return False
 
                     # 已处理候选人直接跳过（方案第 25/26 节）
                     cand_status = get_candidate_status(cand)
@@ -264,7 +254,6 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                         continue
 
                     global_index += 1
-                    name = cand.get('name', '')
                     # 标记处理中
                     if tm and task_id:
                         try:
@@ -274,9 +263,10 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                     download_result = download_single_resume(
                         context, page, name, download_path, global_index, ai_config, job_name
                     )
-                    # 失败重试一次（AI不通过不重试）
+                    # 失败重试一次（AI明确不通过/页面无文本时不重试）
                     if (not download_result.get('success')
-                            and download_result.get('ai_pass') is not False):
+                            and download_result.get('ai_pass') is not False
+                            and download_result.get('ai_retryable', True)):
                         time.sleep(2)
                         download_result = download_single_resume(
                             context, page, name, download_path, global_index, ai_config, job_name
@@ -286,22 +276,59 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                     record(cand, page_num, download_result)
                     time.sleep(1)
 
-                if is_stopped():
+                if new_count > 0:
+                    no_new_count = 0
+                else:
+                    no_new_count += 1
+                if no_new_count >= 3:
                     break
-                if is_pause_requested():
+
+                try:
+                    page.mouse.wheel(0, 600)
+                    time.sleep(1)
+                except Exception:
+                    break
+
+            return True
+
+        if download_all_pages:
+            # 分页下载模式：边滚动边收集并处理（问题2）
+            while not is_stopped():
+                if not ensure_browser_ready() or not refresh_page():
+                    result['error'] = '浏览器断开且自动重连失败，任务已暂停'
+                    result['paused'] = True
+                    break
+
+                # 读取真实总页数（问题3：total_pages 修复）
+                total = read_total_pages(page)
+                if total:
+                    real_total_pages = total
+
+                # 每页从顶部开始收集（问题2：避免残留滚动位置导致漏掉顶部候选人）
+                try:
+                    page.evaluate('''() => {
+                        window.scrollTo(0, 0);
+                        const containers = document.querySelectorAll(
+                            '.list, [class*="virtual_list"], [class*="scroll"], .eh-virtual-scroll'
+                        );
+                        containers.forEach(el => { el.scrollTop = 0; });
+                    }''')
+                    time.sleep(0.5)
+                except Exception:
+                    pass
+
+                if not scroll_collect_and_process():
+                    break
+
+                if is_stopped() or is_pause_requested():
                     break
 
                 # 检测是否有下一页
                 scroll_to_pagination(page)
-                time.sleep(1)
-
                 if not has_next_page(page):
                     break
-
-                # 翻到下一页
                 if not go_to_next_page(page):
                     break
-
                 page_num += 1
         else:
             # 单页下载模式（只下载选中的候选人）
@@ -315,10 +342,20 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                     result['error'] = '浏览器断开且自动重连失败，任务已暂停'
                     result['paused'] = True
                     break
-                if PageDetector.is_logged_in(page=page) == LoginStatus.EXPIRED:
+                status = check_page_ready()
+                if status == 'expired':
                     result['error'] = '前程无忧登录状态已失效，任务已暂停，请重新登录后继续'
                     result['login_expired'] = True
                     break
+                if status == 'drifted':
+                    result['error'] = '页面已离开候选人列表，任务已暂停'
+                    result['paused'] = True
+                    break
+                if status == 'error':
+                    if not (ensure_browser_ready() and refresh_page()):
+                        result['error'] = '浏览器断开且自动重连失败，任务已暂停'
+                        result['paused'] = True
+                        break
 
                 name = cand.get('name', '')
                 if not name:
@@ -336,9 +373,10 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                 download_result = download_single_resume(
                     context, page, name, download_path, i, ai_config, job_name
                 )
-                # 失败重试一次（AI不通过不重试）
+                # 失败重试一次（AI明确不通过/页面无文本时不重试）
                 if (not download_result.get('success')
-                        and download_result.get('ai_pass') is not False):
+                        and download_result.get('ai_pass') is not False
+                        and download_result.get('ai_retryable', True)):
                     time.sleep(2)
                     download_result = download_single_resume(
                         context, page, name, download_path, i, ai_config, job_name
@@ -349,7 +387,7 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                 time.sleep(1)
 
         result['results'] = all_results
-        result['total_pages'] = page_num
+        result['total_pages'] = real_total_pages
         result['current_page'] = page_num
         result['success'] = True
         result['paused'] = is_pause_requested() or is_stopped() or bool(result.get('paused'))
@@ -362,8 +400,86 @@ def run(candidates, download_dir, job_name='', ai_config=None,
     return result
 
 
+def collect_current_candidates(page):
+    """读取当前 DOM 中的候选人（含学校/专业/学历）；读取失败返回 None"""
+    try:
+        return page.evaluate('''() => {
+            const items = document.querySelectorAll('.item.virtual_list');
+            const candidates = [];
+            items.forEach(item => {
+                let name = '';
+                let school = '';
+                let major = '';
+                let education = '';
+
+                const nameEl = item.querySelector('.detail .firstline .name')
+                    || item.querySelector('.name');
+                if (nameEl) {
+                    name = nameEl.textContent.trim();
+                }
+
+                const schoolEl = item.querySelector('.school_name');
+                if (schoolEl) {
+                    school = schoolEl.textContent.trim();
+                }
+
+                const majorEl = item.querySelector('.major_name');
+                if (majorEl) {
+                    major = majorEl.textContent.trim();
+                }
+
+                const detailEl = item.querySelector('.name.context-detail');
+                if (detailEl) {
+                    const spans = detailEl.querySelectorAll('span[title]');
+                    spans.forEach(span => {
+                        const title = span.getAttribute('title');
+                        if (title && (title === '本科' || title === '硕士' || title === '博士' || title === '大专' || title === '专科')) {
+                            education = title;
+                        }
+                    });
+                }
+
+                if (name && name.length > 0 && name.length < 20 && name !== ' ') {
+                    candidates.push({
+                        name: name,
+                        school: school,
+                        major: major,
+                        education: education
+                    });
+                }
+            });
+            return candidates;
+        }''')
+    except Exception:
+        return None
+
+
+def read_total_pages(page):
+    """从分页控件读取真实总页数（问题3：total_pages 修复）"""
+    try:
+        return page.evaluate('''() => {
+            let totalPages = 1;
+            const items = document.querySelectorAll('.eh-pagination__pagelist li');
+            for (const el of items) {
+                const n = parseInt(el.textContent.trim());
+                if (!isNaN(n) && n > totalPages) totalPages = n;
+            }
+            const totalEl = document.querySelector('.eh-pagination__total');
+            if (totalEl) {
+                const match = totalEl.textContent.match(/\\d+/);
+                if (match) {
+                    const calc = Math.ceil(parseInt(match[0]) / 50);
+                    if (calc > totalPages) totalPages = calc;
+                }
+            }
+            return totalPages;
+        }''')
+    except Exception:
+        return None
+
+
 def collect_all_candidates_with_scroll(page):
-    """滚动获取当前页所有候选人（含学校/专业/学历信息）"""
+    """滚动获取当前页所有候选人（保留，供 CLI/调试使用）"""
     all_candidates = []
     seen = set()
     no_new_count = 0
@@ -375,55 +491,8 @@ def collect_all_candidates_with_scroll(page):
         pass
 
     for round_num in range(100):
-        try:
-            current = page.evaluate('''() => {
-                const items = document.querySelectorAll('.item.virtual_list');
-                const candidates = [];
-                items.forEach(item => {
-                    let name = '';
-                    let school = '';
-                    let major = '';
-                    let education = '';
-
-                    const nameEl = item.querySelector('.detail .firstline .name')
-                        || item.querySelector('.name');
-                    if (nameEl) {
-                        name = nameEl.textContent.trim();
-                    }
-
-                    const schoolEl = item.querySelector('.school_name');
-                    if (schoolEl) {
-                        school = schoolEl.textContent.trim();
-                    }
-
-                    const majorEl = item.querySelector('.major_name');
-                    if (majorEl) {
-                        major = majorEl.textContent.trim();
-                    }
-
-                    const detailEl = item.querySelector('.name.context-detail');
-                    if (detailEl) {
-                        const spans = detailEl.querySelectorAll('span[title]');
-                        spans.forEach(span => {
-                            const title = span.getAttribute('title');
-                            if (title && (title === '本科' || title === '硕士' || title === '博士' || title === '大专' || title === '专科')) {
-                                education = title;
-                            }
-                        });
-                    }
-
-                    if (name && name.length > 0 && name.length < 20 && name !== ' ') {
-                        candidates.push({
-                            name: name,
-                            school: school,
-                            major: major,
-                            education: education
-                        });
-                    }
-                });
-                return candidates;
-            }''')
-        except Exception:
+        current = collect_current_candidates(page)
+        if current is None:
             break
 
         new_count = 0
@@ -452,18 +521,26 @@ def collect_all_candidates_with_scroll(page):
 
 
 def scroll_to_pagination(page):
-    """滚动到分页控件"""
+    """滚动到分页控件（优先 scroll_into_view，问题10：减少固定等待）"""
     try:
-        page.mouse.move(600, 400)
-        time.sleep(0.3)
+        el = page.query_selector('.eh-pagination, .eh-pagination__next, .pagination')
+        if el:
+            try:
+                el.scroll_into_view_if_needed(timeout=3000)
+                time.sleep(0.5)
+                return
+            except Exception:
+                pass
     except Exception:
         pass
 
-    for i in range(20):
-        page.mouse.wheel(0, 600)
-        time.sleep(0.5)
-
-    time.sleep(1)
+    # 兜底：少量滚轮
+    for _ in range(5):
+        try:
+            page.mouse.wheel(0, 800)
+            time.sleep(0.3)
+        except Exception:
+            break
 
 
 def has_next_page(page):
@@ -480,8 +557,17 @@ def has_next_page(page):
 
 
 def go_to_next_page(page):
-    """点击下一页"""
+    """点击下一页（问题10：用当前页码变化判断翻页成功，替代 30 秒首名轮询）"""
     try:
+        current_page = page.evaluate('''() => {
+            const active = document.querySelector('.eh-pagination__pagelist li.active, .eh-pagination li.active');
+            if (active) {
+                const n = parseInt(active.textContent.trim());
+                if (!isNaN(n)) return n;
+            }
+            return 0;
+        }''')
+
         old_first = page.evaluate('''() => {
             const items = document.querySelectorAll('.item.virtual_list');
             if (items.length === 0) return '';
@@ -499,17 +585,33 @@ def go_to_next_page(page):
         if not clicked:
             return False
 
-        # 等待页面刷新
-        for wait in range(30):
-            time.sleep(1)
+        # 等待页面刷新（最多 10 秒）
+        for _ in range(20):
+            time.sleep(0.5)
 
+            # 方式1：当前页码变化
+            if current_page:
+                try:
+                    now_page = page.evaluate('''() => {
+                        const active = document.querySelector('.eh-pagination__pagelist li.active, .eh-pagination li.active');
+                        if (active) {
+                            const n = parseInt(active.textContent.trim());
+                            if (!isNaN(n)) return n;
+                        }
+                        return 0;
+                    }''')
+                    if now_page and now_page != current_page:
+                        return True
+                except Exception:
+                    pass
+
+            # 方式2：首名变化（页码取不到时兜底）
             new_first = page.evaluate('''() => {
                 const items = document.querySelectorAll('.item.virtual_list');
                 if (items.length === 0) return '';
                 const nameEl = items[0].querySelector('.detail .firstline .name');
                 return nameEl ? nameEl.textContent.trim() : '';
             }''')
-
             if new_first and new_first != old_first:
                 return True
 
@@ -521,6 +623,30 @@ def go_to_next_page(page):
 def download_single_resume(context, page, candidate_name, download_dir, index, ai_config=None, job_name=""):
     """下载单个候选人简历"""
     result = {"success": False, "name": candidate_name, "file_path": "", "error": "", "ai_pass": None}
+
+    def ai_check(page_for_text):
+        """AI 评估：通过返回 True；不通过/无法评估返回 False（结果写入 result）"""
+        resume_text = read_resume_text(page_for_text)
+        if not resume_text:
+            result["ai_pass"] = None
+            result["ai_reason"] = "无法读取简历文本"
+            result["error"] = "无法读取简历文本，AI筛选跳过（待人工确认）"
+            result["ai_retryable"] = False  # 页面本身无文本，重试无意义
+            return False
+        eval_result = evaluate_resume(
+            resume_text,
+            ai_config.get("match_description", ""),
+            ai_config.get("api_key", "")
+        )
+        result["ai_pass"] = eval_result.get("match")
+        result["ai_reason"] = eval_result.get("reason", "")
+        if eval_result.get("match") is False:
+            result["error"] = f"AI不通过: {eval_result.get('reason', '')}"
+            return False
+        if eval_result.get("match") is None:
+            result["error"] = f"AI评估失败，跳过下载（待人工确认）: {eval_result.get('reason', '')}"
+            return False
+        return True
 
     try:
         # 查找候选人元素
@@ -543,14 +669,14 @@ def download_single_resume(context, page, candidate_name, download_dir, index, a
         detail_page = None
 
         try:
-            with page.expect_popup(timeout=8000) as popup_info:
+            with page.expect_popup(timeout=5000) as popup_info:
                 element.click()
             detail_page = popup_info.value
         except Exception:
             pass
 
         # 未捕获到弹窗：等待新页面或同页跳转
-        for _ in range(16):
+        for _ in range(8):
             if detail_page is not None:
                 break
             time.sleep(0.5)
@@ -570,7 +696,7 @@ def download_single_resume(context, page, candidate_name, download_dir, index, a
                 name_el = find_name_element(page, candidate_name)
                 if name_el:
                     name_el.click()
-                    for _ in range(12):
+                    for _ in range(8):
                         time.sleep(0.5)
                         if len(context.pages) > pages_before:
                             detail_page = context.pages[-1]
@@ -619,9 +745,14 @@ def download_single_resume(context, page, candidate_name, download_dir, index, a
         # 点击附件按钮
         pages_before_attach = len(context.pages)
         attachment_btn.click()
-        time.sleep(2)
 
         pages_after = context.pages
+        # 等待新标签页出现（最多 5 秒，问题10：替代固定 sleep(2)）
+        for _ in range(10):
+            if len(context.pages) > pages_before_attach:
+                pages_after = context.pages
+                break
+            time.sleep(0.5)
 
         if len(pages_after) > pages_before_attach:
             attach_page = pages_after[-1]
@@ -639,22 +770,12 @@ def download_single_resume(context, page, candidate_name, download_dir, index, a
 
             # AI 筛选
             if download_btn and ai_config and ai_config.get("enabled"):
-                resume_text = read_resume_text(attach_page)
-                if resume_text:
-                    eval_result = evaluate_resume(
-                        resume_text,
-                        ai_config.get("match_description", ""),
-                        ai_config.get("api_key", "")
-                    )
-                    result["ai_pass"] = eval_result.get("match", True)
-                    result["ai_reason"] = eval_result.get("reason", "")
-                    if not eval_result.get("match", True):
-                        result["error"] = f"AI不通过: {eval_result.get('reason', '')}"
-                        attach_page.close()
-                        time.sleep(0.5)
-                        detail_page.close()
-                        time.sleep(0.5)
-                        return result
+                if not ai_check(attach_page):
+                    attach_page.close()
+                    time.sleep(0.5)
+                    detail_page.close()
+                    time.sleep(0.5)
+                    return result
 
             if download_btn:
                 try:
@@ -696,20 +817,10 @@ def download_single_resume(context, page, candidate_name, download_dir, index, a
 
             # AI 筛选
             if download_btn and ai_config and ai_config.get("enabled"):
-                resume_text = read_resume_text(detail_page)
-                if resume_text:
-                    eval_result = evaluate_resume(
-                        resume_text,
-                        ai_config.get("match_description", ""),
-                        ai_config.get("api_key", "")
-                    )
-                    result["ai_pass"] = eval_result.get("match", True)
-                    result["ai_reason"] = eval_result.get("reason", "")
-                    if not eval_result.get("match", True):
-                        result["error"] = f"AI不通过: {eval_result.get('reason', '')}"
-                        detail_page.close()
-                        time.sleep(0.5)
-                        return result
+                if not ai_check(detail_page):
+                    detail_page.close()
+                    time.sleep(0.5)
+                    return result
 
             if download_btn:
                 try:
@@ -944,7 +1055,8 @@ def evaluate_resume(resume_text, match_description, api_key):
     from openai import OpenAI
     from config import MIMO_API_BASE, MIMO_MODEL
 
-    client = OpenAI(api_key=api_key, base_url=MIMO_API_BASE)
+    # 问题5：设置请求超时，避免单个候选长时间挂起导致“中断”失灵
+    client = OpenAI(api_key=api_key, base_url=MIMO_API_BASE, timeout=60)
     prompt = f"""你是一个专业的简历筛选助手。请根据以下岗位要求，判断候选人简历是否符合要求。
 
 【岗位要求】
@@ -969,6 +1081,7 @@ def evaluate_resume(resume_text, match_description, api_key):
                 ],
                 temperature=0.1,
                 max_tokens=max_tokens,
+                timeout=60,
             )
 
             content = (completion.choices[0].message.content or "").strip()
@@ -986,4 +1099,5 @@ def evaluate_resume(resume_text, match_description, api_key):
             last_error = str(e)
             continue
 
-    return {"match": True, "reason": f"AI评估失败({last_error})，默认通过"}
+    # 问题5：评估失败不再默认放行，标记 unknown 由上层跳过并记录
+    return {"match": None, "reason": f"AI评估失败({last_error})"}

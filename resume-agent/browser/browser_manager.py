@@ -109,6 +109,8 @@ class BrowserManager:
                 "--no-default-browser-check",
                 "--disable-popup-blocking",
                 "--disable-translate",
+                # 问题9：新版 Chrome 对 CDP 有 Origin 校验，缺少该参数会导致连接被拒
+                "--remote-allow-origins=*",
             ]
             self.chrome_process = subprocess.Popen(
                 cmd,
@@ -231,19 +233,20 @@ class BrowserManager:
         """
         浏览器断开自动恢复（方案第 24 节）：
         暂停当前自动化动作 -> 尝试重新启动 Chrome -> 重新连接
-        第1次等3秒 / 第2次等5秒 / 第3次等10秒
+        问题9：不再固定空等，先立即检查端口；仅在上一次尝试失败后短暂退避
         """
         self._set_state(BrowserState.RECONNECTING)
         self._emit('browser_disconnected', '检测到浏览器断开，正在自动重连...')
         self._teardown_playwright()
 
-        waits = RECONNECT_WAITS + [10] * max_attempts
         for attempt in range(max_attempts):
-            wait = waits[attempt] if attempt < len(waits) else 10
-            time.sleep(wait)
-            self._emit('browser_reconnecting', f'重连尝试 {attempt + 1}/{max_attempts}')
+            if attempt > 0:
+                wait = RECONNECT_WAITS[min(attempt - 1, len(RECONNECT_WAITS) - 1)]
+                time.sleep(wait)
+                self._emit('browser_reconnecting', f'重连尝试 {attempt + 1}/{max_attempts}')
 
             if not self.is_debug_port_open():
+                self._emit('browser_reconnecting', '调试端口未开放，正在重新启动 Chrome...')
                 self.launch_chrome(wait_seconds=15)
 
             if self.connect() and self.health_check():

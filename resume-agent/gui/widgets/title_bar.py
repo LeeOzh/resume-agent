@@ -29,7 +29,7 @@ class TitleBar(QWidget):
         layout.setSpacing(4)
 
         # 应用名
-        self.title_label = QLabel("AI 简历批量初筛与下载助手")
+        self.title_label = QLabel("林林专属助手")
         self.title_label.setObjectName("titleLabel")
         layout.addWidget(self.title_label)
         layout.addStretch(1)

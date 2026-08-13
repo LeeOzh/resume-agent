@@ -145,6 +145,13 @@ class TaskManager:
     def stats(self, task_id: int) -> dict:
         return self.db.get_task_stats(task_id)
 
+    def save_candidate_result(self, task_id: int, candidate: dict, page_num: int,
+                              download_result: dict, progress: dict = None):
+        """单事务保存候选人处理结果与任务进度（问题11：减少连接次数）"""
+        return self.db.save_candidate_result(
+            task_id, candidate, page_num, download_result, progress
+        )
+
     # ==================== 日志 ====================
 
     def log(self, task_id: int, event_type: str, message: str,

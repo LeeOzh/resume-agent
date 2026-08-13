@@ -9,7 +9,7 @@ echo.
 echo 正在启动 Chrome...
 echo.
 
-start "" "chrome.exe" --remote-debugging-port=9222 --user-data-dir=C:\chrome-agent
+start "" "chrome.exe" --remote-debugging-port=9222 --user-data-dir=%LOCALAPPDATA%\ResumeAgent\chrome-profile --remote-allow-origins=*
 
 echo Chrome 已启动！
 echo.

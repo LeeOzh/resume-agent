@@ -11,11 +11,29 @@ openai_datas, openai_binaries, openai_hiddenimports = collect_all('openai')
 # 收集 PyQt6 及其所有依赖
 pyqt6_datas, pyqt6_binaries, pyqt6_hiddenimports = collect_all('PyQt6')
 
+# wechat monitor: pywechat127 (pyweixin) and its dependency chain.
+# skip collection gracefully when a package is not installed on the build machine.
+_wechat_pkgs = [
+    'pywechat', 'pyweixin', 'pywinauto', 'pyautogui', 'comtypes',
+    'pywin32', 'pycaw', 'sounddevice', 'soundfile', 'emoji',
+    'packaging', 'psutil', 'pyscreeze', 'pymsgbox', 'pygetwindow',
+    'mouseinfo', 'pyperclip', 'pyrect', 'pytweening',
+]
+_wechat_datas, _wechat_binaries, _wechat_hiddenimports = [], [], []
+for _pkg in _wechat_pkgs:
+    try:
+        _d, _b, _h = collect_all(_pkg)
+        _wechat_datas += _d
+        _wechat_binaries += _b
+        _wechat_hiddenimports += _h
+    except Exception:
+        pass
+
 a = Analysis(
     ['main_gui.py'],
     pathex=[],
-    binaries=openai_binaries + pyqt6_binaries,
-    datas=openai_datas + pyqt6_datas + [
+    binaries=(openai_binaries + pyqt6_binaries + _wechat_binaries),
+    datas=(openai_datas + pyqt6_datas + _wechat_datas + [
         ('gui/resources/styles/*.qss', 'gui/resources/styles'),
         ('gui/resources/icons/*.svg', 'gui/resources/icons'),
         ('browser_worker.py', '.'),
@@ -25,8 +43,10 @@ a = Analysis(
         ('crawler/*.py', 'crawler'),
         ('db/*.py', 'db'),
         ('task/*.py', 'task'),
+        ('wechat/*.py', 'wechat'),
+        ('gui/pages/*.py', 'gui/pages'),
         ('main.py', '.'),
-    ],
+    ]),
     hiddenimports=[
         'playwright',
         'playwright.sync_api',
@@ -37,11 +57,14 @@ a = Analysis(
         'psutil',
         'xlrd',
         'nest_asyncio',
+        'pywechat', 'pyweixin', 'pywinauto', 'pyautogui',
+        'comtypes', 'pywin32', 'pycaw', 'sounddevice', 'soundfile',
+        'emoji', 'packaging', 'psutil',
         'PyQt6',
         'PyQt6.QtWidgets',
         'PyQt6.QtCore',
         'PyQt6.QtGui',
-    ] + openai_hiddenimports + pyqt6_hiddenimports,
+    ] + openai_hiddenimports + pyqt6_hiddenimports + _wechat_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -61,7 +84,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='AI简历批量初筛与下载助手',
+    name='林林专属助手',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

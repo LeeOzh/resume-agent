@@ -148,11 +148,26 @@ class Database:
                     FOREIGN KEY (task_id) REFERENCES tasks(id)
                 );
                 
+                CREATE TABLE IF NOT EXISTS wechat_resume_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_name TEXT DEFAULT '',
+                    file_name TEXT DEFAULT '',
+                    candidate_name TEXT DEFAULT '',
+                    file_ext TEXT DEFAULT '',
+                    file_path TEXT DEFAULT '',
+                    sender TEXT DEFAULT '',
+                    status TEXT DEFAULT 'downloaded',
+                    error_message TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
                 CREATE INDEX IF NOT EXISTS idx_tasks_job_id ON tasks(job_id);
                 CREATE INDEX IF NOT EXISTS idx_task_candidates_task_id ON task_candidates(task_id);
                 CREATE INDEX IF NOT EXISTS idx_task_candidates_external_id ON task_candidates(candidate_external_id);
                 CREATE INDEX IF NOT EXISTS idx_task_candidates_status ON task_candidates(download_status);
+                CREATE INDEX IF NOT EXISTS idx_wechat_records_group ON wechat_resume_records(group_name);
             ''')
             conn.commit()
         finally:
@@ -761,6 +776,109 @@ class Database:
             conn.commit()
         finally:
             conn.close()
+
+    def save_candidate_result(self, task_id: int, candidate: dict, page_num: int,
+                              download_result: dict, progress: dict = None):
+        """
+        单事务保存候选人处理结果 + 任务进度（问题11：减少每个候选人的数据库连接次数）
+
+        Args:
+            candidate: 候选人信息（name/school/major/education/external_id/sort_index）
+            download_result: 下载结果（success/ai_pass/ai_reason/file_path/error）
+            progress: 任务进度字段（processed_count/success_count/failed_count/
+                      ai_pass_count/ai_fail_count/current_page/total_pages）
+        """
+        conn = self._get_conn()
+        try:
+            now = datetime.now()
+            name = candidate.get('name', '') or ''
+            school = candidate.get('school', '') or ''
+            major = candidate.get('major', '') or ''
+            education = candidate.get('education', '') or ''
+            ext_id = candidate.get('external_id', '') or generate_candidate_external_id(name, school, major)
+            sort_index = candidate.get('sort_index', 0) or 0
+
+            # 1) UPSERT 候选人
+            conn.execute('''
+                INSERT INTO task_candidates (
+                    task_id, candidate_external_id, name, school, major, education,
+                    page_num, sort_index, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                ON CONFLICT(task_id, candidate_external_id) DO UPDATE SET
+                    name=excluded.name, school=excluded.school, major=excluded.major,
+                    education=excluded.education, page_num=excluded.page_num,
+                    sort_index=excluded.sort_index, updated_at=excluded.updated_at
+            ''', (task_id, ext_id, name, school, major, education, page_num, sort_index, now, now))
+
+            ai_pass = download_result.get('ai_pass')
+            ai_reason = download_result.get('ai_reason', '') or ''
+            success = bool(download_result.get('success'))
+
+            # 2) AI 评估结果（ai_pass=None 但有 reason 时也记录 reason，用于“未评估”留痕）
+            if ai_pass is not None:
+                conn.execute('''
+                    UPDATE task_candidates
+                    SET ai_processed=1, ai_pass=?, ai_reason=?, updated_at=?
+                    WHERE task_id=? AND candidate_external_id=?
+                ''', (1 if ai_pass else 0, ai_reason, now, task_id, ext_id))
+                if ai_pass is False:
+                    conn.execute('''
+                        UPDATE task_candidates
+                        SET status='ai_rejected', download_status='skipped',
+                            processed_at=COALESCE(processed_at, ?), updated_at=?
+                        WHERE task_id=? AND candidate_external_id=?
+                    ''', (now, now, task_id, ext_id))
+            elif ai_reason:
+                conn.execute('''
+                    UPDATE task_candidates
+                    SET ai_processed=1, ai_reason=?, updated_at=?
+                    WHERE task_id=? AND candidate_external_id=?
+                ''', (ai_reason, now, task_id, ext_id))
+
+            # 3) 下载结果状态（AI 拒绝的不再覆盖）
+            if success:
+                status, d_status, file_path, err = 'downloaded', 'success', download_result.get('file_path', '') or '', ''
+            elif ai_pass is not False:
+                status, d_status, file_path, err = 'failed', 'failed', '', download_result.get('error', '') or ''
+            else:
+                status = d_status = file_path = err = None
+
+            if status:
+                conn.execute('''
+                    UPDATE task_candidates
+                    SET status=?, download_status=?, file_path=?, error_message=?,
+                        processed_at=COALESCE(processed_at, ?), updated_at=?
+                    WHERE task_id=? AND candidate_external_id=?
+                ''', (status, d_status, file_path, err,
+                      now if status in ('downloaded', 'ai_rejected', 'failed') else None,
+                      now, task_id, ext_id))
+
+            # 4) 任务进度（同一事务）
+            if progress:
+                allowed = [
+                    'total_candidates', 'processed_count', 'success_count',
+                    'downloaded_count', 'failed_count', 'ai_pass_count', 'ai_fail_count',
+                    'rejected_count', 'current_page', 'total_pages', 'excel_path',
+                    'current_candidate_id', 'candidate_list_url'
+                ]
+                updates = []
+                values = []
+                for field_name, value in progress.items():
+                    if field_name in allowed:
+                        updates.append(f"{field_name}=?")
+                        values.append(value)
+                if updates:
+                    updates.append("updated_at=?")
+                    values.append(now)
+                    values.append(task_id)
+                    conn.execute(
+                        f"UPDATE tasks SET {', '.join(updates)} WHERE id=?",
+                        values
+                    )
+
+            conn.commit()
+        finally:
+            conn.close()
     
     def _row_to_candidate(self, row) -> TaskCandidate:
         """将数据库行转换为TaskCandidate对象"""
@@ -852,5 +970,58 @@ class Database:
                 'remaining': row['remaining'] or 0,
                 'failed_status': row['failed_status'] or 0,
             }
+        finally:
+            conn.close()
+
+    # ==================== wechat resume monitor ====================
+
+    def add_wechat_record(self, group_name='', file_name='',
+                          candidate_name='', file_ext='',
+                          file_path='', sender='',
+                          status='downloaded',
+                          error_message=''):
+        """insert a wechat resume record, return record id"""
+        conn = self._get_conn()
+        try:
+            now = datetime.now()
+            cur = conn.execute('''
+                INSERT INTO wechat_resume_records (
+                    group_name, file_name, candidate_name, file_ext,
+                    file_path, sender, status, error_message,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                group_name or '', file_name or '', candidate_name or '',
+                file_ext or '', file_path or '', sender or '',
+                status or 'downloaded', error_message or '',
+                now, now,
+            ))
+            conn.commit()
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+    def get_wechat_records(self, limit=200):
+        """query wechat resume records, newest first"""
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM wechat_resume_records ORDER BY id DESC LIMIT ?",
+                (int(limit),)
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def update_wechat_record_name(self, record_id, candidate_name):
+        """manually fix candidate name of a record"""
+        conn = self._get_conn()
+        try:
+            conn.execute('''
+                UPDATE wechat_resume_records
+                SET candidate_name=?, status='downloaded', error_message='', updated_at=?
+                WHERE id=?
+            ''', (candidate_name or '', datetime.now(), int(record_id)))
+            conn.commit()
         finally:
             conn.close()

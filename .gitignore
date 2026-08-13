@@ -15,6 +15,7 @@ build/
 dist/
 *.spec
 *.exe
+dist.zip
 
 # IDE
 .vscode/
