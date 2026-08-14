@@ -97,6 +97,11 @@ class WeChatMonitorThread(QThread):
             return
         if Path(file_name).suffix.lower() != '.pdf':
             return
+        # 只处理目标公司前缀开头的简历文件（如 广州海颐-xxx），其它忽略
+        config = load_wechat_config()
+        prefixes = config.get("company_prefixes") or []
+        if not any(str(file_name).startswith(p) for p in prefixes if p):
+            return
 
         # 数据库中已存在的文件不再重复处理
         pair = (str(self.group_name), file_name)
@@ -124,7 +129,6 @@ class WeChatMonitorThread(QThread):
             return
 
         # 解析姓名
-        config = load_wechat_config()
         name = parse_candidate_name(file_name, config.get("company_prefixes"))
         if name:
             status, error = 'downloaded', ''
