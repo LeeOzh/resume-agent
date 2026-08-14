@@ -77,3 +77,41 @@ class SiteAdapter(ABC):
     @abstractmethod
     def parse_candidates(self, data: list) -> list:
         """原始数据 -> 统一候选人结构列表（清洗/标准化）"""
+
+    # ---------------- 下载能力（站点特有交互，流程编排归 Workflow） ----------------
+
+    @abstractmethod
+    def has_next_page(self, driver) -> bool:
+        """检查是否有下一页（站点分页 DOM）"""
+
+    @abstractmethod
+    def go_to_next_page(self, driver) -> bool:
+        """点击下一页并等待翻页生效（站点交互 + 等待策略）"""
+
+    @abstractmethod
+    def scroll_to_pagination(self, driver):
+        """滚动到分页控件（站点分页 selector + 兜底滚轮）"""
+
+    @abstractmethod
+    def find_candidate_by_name(self, driver, name: str):
+        """按姓名定位候选人元素（站点列表 DOM），无则返回 None"""
+
+    @abstractmethod
+    def find_name_element(self, driver, name: str):
+        """按姓名定位候选人姓名字素（站点列表 DOM），无则返回 None"""
+
+    @abstractmethod
+    def find_attachment_button(self, driver):
+        """定位简历附件按钮（站点详情 DOM），无则返回 None"""
+
+    @abstractmethod
+    def find_download_button(self, driver):
+        """定位下载按钮（站点附件/详情 DOM），无则返回 None"""
+
+    @abstractmethod
+    def extract_resume_text(self, driver) -> str:
+        """读取简历详情页文本（站点详情 DOM），失败返回空串"""
+
+    @abstractmethod
+    def scroll_to_top(self, driver):
+        """滚动到列表顶部并重置滚动容器（站点列表 DOM）"""

@@ -109,3 +109,32 @@ class SiteBoss(SiteAdapter):
                 'education': str(item.get('education', '') or '').strip(),
             })
         return candidates
+
+    # ---------------- 下载能力（骨架占位） ----------------
+
+    def has_next_page(self, driver) -> bool:
+        return False
+
+    def go_to_next_page(self, driver) -> bool:
+        return False
+
+    def scroll_to_pagination(self, driver):
+        return None
+
+    def find_candidate_by_name(self, driver, name: str):
+        return None
+
+    def find_name_element(self, driver, name: str):
+        return None
+
+    def find_attachment_button(self, driver, timeout: int = 12):
+        return None
+
+    def find_download_button(self, driver, timeout: int = 15):
+        return None
+
+    def extract_resume_text(self, driver) -> str:
+        return ''
+
+    def scroll_to_top(self, driver):
+        return None

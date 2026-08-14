@@ -162,6 +162,88 @@ JS_GET_CANDIDATES = '''() => {
     return candidates;
 }'''
 
+JS_FIND_CANDIDATE_INDEX = '''(name) => {
+    const items = document.querySelectorAll('.item.virtual_list');
+    for (let i = 0; i < items.length; i++) {
+        const nameEl = items[i].querySelector('.detail .firstline .name') || items[i].querySelector('.name');
+        if (nameEl && nameEl.textContent.trim() === name) {
+            return i;
+        }
+    }
+    return -1;
+}'''
+
+JS_GET_ACTIVE_PAGE = '''() => {
+    const active = document.querySelector('.eh-pagination__pagelist li.active, .eh-pagination li.active');
+    if (active) {
+        const n = parseInt(active.textContent.trim());
+        if (!isNaN(n)) return n;
+    }
+    return 0;
+}'''
+
+JS_GET_FIRST_NAME = '''() => {
+    const items = document.querySelectorAll('.item.virtual_list');
+    if (items.length === 0) return '';
+    const nameEl = items[0].querySelector('.detail .firstline .name');
+    return nameEl ? nameEl.textContent.trim() : '';
+}'''
+
+JS_HAS_NEXT_PAGE = '''() => {
+    const nextBtn = document.querySelector('.eh-pagination__next.btn-next, .eh-pagination .btn-next');
+    if (!nextBtn) return false;
+    return !(nextBtn.disabled || nextBtn.hasAttribute('disabled'));
+}'''
+
+JS_CLICK_NEXT = '''() => {
+    const nextBtn = document.querySelector('.eh-pagination__next.btn-next, .eh-pagination .btn-next');
+    if (!nextBtn) return false;
+    nextBtn.click();
+    return true;
+}'''
+
+JS_GET_TOTAL_PAGES = '''() => {
+    let totalPages = 1;
+    const items = document.querySelectorAll('.eh-pagination__pagelist li');
+    for (const el of items) {
+        const n = parseInt(el.textContent.trim());
+        if (!isNaN(n) && n > totalPages) totalPages = n;
+    }
+    const totalEl = document.querySelector('.eh-pagination__total');
+    if (totalEl) {
+        const match = totalEl.textContent.match(/\\d+/);
+        if (match) {
+            const calc = Math.ceil(parseInt(match[0]) / 50);
+            if (calc > totalPages) totalPages = calc;
+        }
+    }
+    return totalPages;
+}'''
+
+JS_SCROLL_TO_TOP = '''() => {
+    window.scrollTo(0, 0);
+    const containers = document.querySelectorAll(
+        '.list, [class*="virtual_list"], [class*="scroll"], .eh-virtual-scroll'
+    );
+    containers.forEach(el => { el.scrollTop = 0; });
+}'''
+
+JS_READ_RESUME_TEXT = '''() => {
+    const selectors = [
+        '.resume-content', '.resume-detail', '.resume-preview',
+        '.attachment-content', '.file-content', '.pdf-content',
+        '[class*="resume"]', '[class*="preview"]', '[class*="detail"]'
+    ];
+    for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el && el.innerText.trim().length > 100) {
+            return el.innerText.trim().substring(0, 8000);
+        }
+    }
+    const body = document.body.innerText.trim();
+    return body.substring(0, 8000);
+}'''
+
 
 class Site51Job(SiteAdapter):
     """前程无忧（ehire.51job.com）站点适配器"""
@@ -187,7 +269,26 @@ class Site51Job(SiteAdapter):
         'pagination_list': '.eh-pagination__pagelist li',
         'pagination_active': '.eh-pagination__pagelist li.active',
         'pagination_total': '.eh-pagination__total',
+        'pagination_scroll': '.eh-pagination, .eh-pagination__next, .pagination',
+        'attachment_btn': '.attach_resume_item, #attachment, [class*="attachment"]',
+        'download_btn': '.btn_item_download .download_a, .download_a, a.download_a, [class*="download"] a',
     }
+
+    # 附件按钮候选（对齐 download_worker 原 selectors，含 has-text 兜底）
+    ATTACHMENT_SELECTORS = [
+        '.attach_resume_item',
+        '#attachment',
+        '[class*="attachment"]:has-text("附件个人信息")',
+        '[class*="attachment"]',
+    ]
+
+    # 下载按钮候选（对齐 download_worker 原 selectors）
+    DOWNLOAD_SELECTORS = [
+        '.btn_item_download .download_a',
+        '.download_a',
+        'a.download_a',
+        '[class*="download"] a',
+    ]
 
     def url(self, name: str) -> str:
         if name in self.URLS:
@@ -258,3 +359,94 @@ class Site51Job(SiteAdapter):
                 'education': str(item.get('education', '') or '').strip(),
             })
         return candidates
+
+    # ---------------- 下载能力 ----------------
+
+    def has_next_page(self, driver) -> bool:
+        try:
+            return bool(driver.evaluate(JS_HAS_NEXT_PAGE))
+        except Exception:
+            return False
+
+    def go_to_next_page(self, driver) -> bool:
+        """点击下一页并等待翻页生效（页码变化优先，首名变化兜底）"""
+        import time as _time
+        try:
+            current_page = driver.evaluate(JS_GET_ACTIVE_PAGE) or 0
+            old_first = driver.evaluate(JS_GET_FIRST_NAME) or ''
+            clicked = driver.evaluate(JS_CLICK_NEXT)
+            if not clicked:
+                return False
+            for _ in range(20):
+                _time.sleep(0.5)
+                if current_page:
+                    try:
+                        now_page = driver.evaluate(JS_GET_ACTIVE_PAGE) or 0
+                        if now_page and now_page != current_page:
+                            return True
+                    except Exception:
+                        pass
+                new_first = driver.evaluate(JS_GET_FIRST_NAME) or ''
+                if new_first and new_first != old_first:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def scroll_to_pagination(self, driver):
+        """滚动到分页控件（scroll_into_view 优先，兜底滚轮）"""
+        import time as _time
+        el = driver.query_selector(self.selector('pagination_scroll'))
+        if el is not None and driver.scroll_into_view(el, timeout=3000):
+            _time.sleep(0.5)
+            return
+        for _ in range(5):
+            try:
+                driver.scroll_wheel(0, 800)
+                _time.sleep(0.3)
+            except Exception:
+                break
+
+    def find_candidate_by_name(self, driver, name: str):
+        try:
+            index = driver.evaluate(JS_FIND_CANDIDATE_INDEX, name)
+            if index is None or index < 0:
+                return None
+            items = driver.query_selector_all(self.selector('candidate_item'))
+            if 0 <= index < len(items):
+                return items[index]
+            return None
+        except Exception:
+            return None
+
+    def find_name_element(self, driver, name: str):
+        try:
+            index = driver.evaluate(JS_FIND_CANDIDATE_INDEX, name)
+            if index is None or index < 0:
+                return None
+            items = driver.query_selector_all(self.selector('candidate_item'))
+            if 0 <= index < len(items):
+                item = items[index]
+                return (item.query_selector('.detail .firstline .name')
+                        or item.query_selector('.name'))
+            return None
+        except Exception:
+            return None
+
+    def find_attachment_button(self, driver, timeout: int = 12):
+        return driver.wait_for_element(self.ATTACHMENT_SELECTORS, timeout=timeout)
+
+    def find_download_button(self, driver, timeout: int = 15):
+        return driver.wait_for_element(self.DOWNLOAD_SELECTORS, timeout=timeout)
+
+    def extract_resume_text(self, driver) -> str:
+        try:
+            return str(driver.evaluate(JS_READ_RESUME_TEXT) or '')
+        except Exception:
+            return ''
+
+    def scroll_to_top(self, driver):
+        try:
+            driver.evaluate(JS_SCROLL_TO_TOP)
+        except Exception:
+            pass

@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 下载操作进程 - 在独立进程中运行，支持分页下载和中断
+
+Phase 4B-1：站点知识全部下沉到 SiteAdapter，浏览器操作经 BrowserDriver。
+业务流程、重试次数、兜底顺序、异常处理与原实现逐行一致。
 """
 import sys
 import json
 import time
 from pathlib import Path
 from datetime import datetime
+
+from browser.actions import BrowserDriver
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = Path(sys.executable).parent
@@ -16,12 +21,12 @@ else:
 sys.path.insert(0, str(BASE_DIR))
 
 
-def run(candidates, download_dir, job_name='', ai_config=None, 
+def run(candidates, download_dir, job_name='', ai_config=None,
         download_all_pages=False, stop_event=None, task_id=None, db_path=None,
         pause_event=None):
     """
     执行下载操作
-    
+
     Args:
         candidates: 候选人列表，每个为dict（name/school/major/education）
         download_dir: 下载目录
@@ -29,19 +34,24 @@ def run(candidates, download_dir, job_name='', ai_config=None,
         ai_config: AI配置
         download_all_pages: 是否下载所有页
         stop_event: multiprocessing.Event，用于跨进程中断
-        task_id: 数据库任务ID，用于候选人状态实时持久化
-        db_path: 数据库文件路径（默认使用项目配置）
         pause_event: multiprocessing.Event，暂停请求（当前候选人完成后暂停）
+        task_id: 任务ID（用于状态更新）
+        db_path: 数据库路径（可选）
     """
-    # 兼容旧调用：只传姓名列表
+    from browser.browser_manager import BrowserManager
+    from sites import Site51Job
+    from db.models import generate_candidate_external_id
+    from task import TaskManager
+
+    site = Site51Job()
+
+    # 兼容旧调用：candidates 为纯名字列表
     if candidates and isinstance(candidates[0], str):
         candidates = [{'name': n} for n in candidates]
 
-    # 数据库持久化（候选人状态实时写入，禁止攒到最后一次性保存）
     tm = None
     if task_id:
         try:
-            from task import TaskManager
             tm = TaskManager(db_path) if db_path else TaskManager()
         except Exception:
             tm = None
@@ -59,7 +69,6 @@ def run(candidates, download_dir, job_name='', ai_config=None,
         if candidate.get('external_id'):
             return candidate['external_id']
         try:
-            from db.models import generate_candidate_external_id
             return generate_candidate_external_id(
                 candidate.get('name', ''),
                 candidate.get('school', '') or '',
@@ -69,7 +78,7 @@ def run(candidates, download_dir, job_name='', ai_config=None,
             return candidate.get('name', '') or ''
 
     def get_candidate_status(candidate):
-        """查询候选人当前状态，用于跳过已处理候选人"""
+        """获取候选人在任务中的当前状态"""
         if not tm or not task_id:
             return None
         try:
@@ -87,24 +96,29 @@ def run(candidates, download_dir, job_name='', ai_config=None,
         'error': ''
     }
 
-    # 从数据库恢复已累计的进度（恢复任务时计数不归零，方案第 21 节）
-    base_counters = {'processed': 0, 'success': 0, 'failed': 0, 'ai_pass': 0, 'ai_fail': 0}
+    real_total_pages = 1
+    page_num = 1
+    all_results = []
+    processed_count = 0
+    success_count = 0
+    failed_count = 0
+    ai_pass_count = 0
+    ai_fail_count = 0
+
+    # 恢复任务时读取已处理计数
     if tm and task_id:
         try:
             t = tm.get_task(task_id)
-            base_counters['processed'] = t.processed_count or 0
-            base_counters['success'] = t.success_count or 0
-            base_counters['failed'] = t.failed_count or 0
-            base_counters['ai_pass'] = t.ai_pass_count or 0
-            base_counters['ai_fail'] = t.ai_fail_count or 0
+            if t:
+                processed_count = t.processed_count or 0
+                success_count = t.success_count or 0
+                failed_count = t.failed_count or 0
+                ai_pass_count = t.ai_pass_count or 0
+                ai_fail_count = t.ai_fail_count or 0
         except Exception:
             pass
 
     try:
-        from browser.browser_manager import BrowserManager
-        from browser.page_detector import PageDetector, LoginStatus, PageType
-
-        # 统一由 BrowserManager 启动/连接（方案第 3 节）
         manager = BrowserManager()
         if not manager.initialize(auto_launch=True):
             result['error'] = manager.last_error or '浏览器连接失败'
@@ -117,51 +131,41 @@ def run(candidates, download_dir, job_name='', ai_config=None,
             manager.close()
             return result
 
-        # 登录状态检测：登录失效时禁止候选人自动化操作（方案第 9 节）
-        if PageDetector.is_logged_in(page=page) == LoginStatus.EXPIRED:
+        driver = BrowserDriver(page)
+
+        # 登录检查（站点能力）
+        if site.is_logged_in(driver) == 'expired':
             result['error'] = '前程无忧登录状态已失效，请重新登录'
             result['login_expired'] = True
             manager.close()
             return result
 
         def ensure_browser_ready():
-            """浏览器健康检查，断开时自动重连（最多3次）"""
+            """确保浏览器可用，断开则重连"""
             if manager.health_check():
                 return True
             return manager.reconnect()
 
         def refresh_page():
-            """重连后重新获取 page/context"""
-            nonlocal page, context
+            """重新获取 page/context（页面可能被重连/跳转替换）"""
+            nonlocal page, context, driver
             page = manager.get_page()
             context = manager.context
+            if page is not None:
+                driver = BrowserDriver(page)
             return page is not None and context is not None
 
         def check_page_ready():
-            """单次 evaluate 校验页面类型与登录状态（问题8：合并健康/登录/页面检查）"""
+            """检查当前页面状态：ok / expired / drifted / error"""
             try:
-                page_type = PageDetector.detect(page=page)
+                page_type = site.detect_page(driver)
             except Exception:
                 return 'error'
-            if page_type == PageType.LOGIN_PAGE:
+            if page_type == 'LOGIN_PAGE':
                 return 'expired'
-            if page_type not in (PageType.CANDIDATE_LIST_PAGE, PageType.JOB_LIST_PAGE):
+            if page_type not in ('CANDIDATE_LIST_PAGE', 'JOB_LIST_PAGE'):
                 return 'drifted'
             return 'ok'
-
-        # 创建下载目录
-        download_path = Path(download_dir)
-        download_path.mkdir(parents=True, exist_ok=True)
-
-        all_results = []
-        page_num = 1
-        real_total_pages = 1
-        global_index = 0
-        processed_count = base_counters['processed']
-        success_count = base_counters['success']
-        failed_count = base_counters['failed']
-        ai_pass_count = base_counters['ai_pass']
-        ai_fail_count = base_counters['ai_fail']
 
         def record(candidate, page_no, download_result):
             """统计并持久化单个候选人的处理结果"""
@@ -195,12 +199,13 @@ def run(candidates, download_dir, job_name='', ai_config=None,
 
         def scroll_collect_and_process():
             """边滚动边收集并处理当前页候选人（问题2：避免回顶后 DOM 回收导致漏人）"""
-            nonlocal global_index
+            nonlocal page, driver, all_results
+            global_index = 0
             seen = set()
             no_new_count = 0
 
             try:
-                page.mouse.move(600, 400)
+                driver.mouse_move(600, 400)
                 time.sleep(0.3)
             except Exception:
                 pass
@@ -209,14 +214,13 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                 if is_stopped() or is_pause_requested():
                     return False
 
-                current = collect_current_candidates(page)
+                current = site.extract_candidates(driver)
                 if current is None:
-                    # 浏览器可能断开：重连一次后重试
                     if not (ensure_browser_ready() and refresh_page()):
                         result['error'] = '浏览器断开且自动重连失败，任务已暂停'
                         result['paused'] = True
                         return False
-                    current = collect_current_candidates(page)
+                    current = site.extract_candidates(driver)
                     if current is None:
                         result['error'] = '页面读取失败，任务已暂停'
                         result['paused'] = True
@@ -232,7 +236,6 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                     seen.add(name)
                     new_count += 1
 
-                    # 页面/登录状态校验（单次 evaluate，问题8）
                     status = check_page_ready()
                     if status == 'expired':
                         result['error'] = '前程无忧登录状态已失效，任务已暂停，请重新登录后继续'
@@ -248,20 +251,19 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                             result['paused'] = True
                             return False
 
-                    # 已处理候选人直接跳过（方案第 25/26 节）
                     cand_status = get_candidate_status(cand)
                     if cand_status in ('downloaded', 'ai_rejected'):
                         continue
 
-                    global_index += 1
-                    # 标记处理中
                     if tm and task_id:
                         try:
                             tm.mark_candidate_processing(task_id, candidate_ext_id(cand))
                         except Exception:
                             pass
+
+                    global_index += 1
                     download_result = download_single_resume(
-                        context, page, name, download_path, global_index, ai_config, job_name
+                        driver, site, name, download_dir, global_index, ai_config, job_name
                     )
                     # 失败重试一次（AI明确不通过/页面无文本时不重试）
                     if (not download_result.get('success')
@@ -269,22 +271,22 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                             and download_result.get('ai_retryable', True)):
                         time.sleep(2)
                         download_result = download_single_resume(
-                            context, page, name, download_path, global_index, ai_config, job_name
+                            driver, site, name, download_dir, global_index, ai_config, job_name
                         )
                     download_result['page'] = page_num
                     all_results.append(download_result)
                     record(cand, page_num, download_result)
                     time.sleep(1)
 
-                if new_count > 0:
-                    no_new_count = 0
-                else:
+                if new_count == 0:
                     no_new_count += 1
+                else:
+                    no_new_count = 0
                 if no_new_count >= 3:
                     break
 
                 try:
-                    page.mouse.wheel(0, 600)
+                    driver.scroll_wheel(0, 600)
                     time.sleep(1)
                 except Exception:
                     break
@@ -292,30 +294,23 @@ def run(candidates, download_dir, job_name='', ai_config=None,
             return True
 
         if download_all_pages:
-            # 分页下载模式：边滚动边收集并处理（问题2）
+            # 读取真实总页数（问题3：total_pages 修复）
+            total = site.extract_pagination(driver).get('totalPages', 1)
+            if total:
+                real_total_pages = total
+
+            # 每页从顶部开始收集（问题2：避免残留滚动位置导致漏掉顶部候选人）
+            try:
+                site.scroll_to_top(driver)
+                time.sleep(0.5)
+            except Exception:
+                pass
+
             while not is_stopped():
                 if not ensure_browser_ready() or not refresh_page():
                     result['error'] = '浏览器断开且自动重连失败，任务已暂停'
                     result['paused'] = True
                     break
-
-                # 读取真实总页数（问题3：total_pages 修复）
-                total = read_total_pages(page)
-                if total:
-                    real_total_pages = total
-
-                # 每页从顶部开始收集（问题2：避免残留滚动位置导致漏掉顶部候选人）
-                try:
-                    page.evaluate('''() => {
-                        window.scrollTo(0, 0);
-                        const containers = document.querySelectorAll(
-                            '.list, [class*="virtual_list"], [class*="scroll"], .eh-virtual-scroll'
-                        );
-                        containers.forEach(el => { el.scrollTop = 0; });
-                    }''')
-                    time.sleep(0.5)
-                except Exception:
-                    pass
 
                 if not scroll_collect_and_process():
                     break
@@ -324,10 +319,10 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                     break
 
                 # 检测是否有下一页
-                scroll_to_pagination(page)
-                if not has_next_page(page):
+                site.scroll_to_pagination(driver)
+                if not site.has_next_page(driver):
                     break
-                if not go_to_next_page(page):
+                if not site.go_to_next_page(driver):
                     break
                 page_num += 1
         else:
@@ -342,6 +337,7 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                     result['error'] = '浏览器断开且自动重连失败，任务已暂停'
                     result['paused'] = True
                     break
+
                 status = check_page_ready()
                 if status == 'expired':
                     result['error'] = '前程无忧登录状态已失效，任务已暂停，请重新登录后继续'
@@ -370,8 +366,9 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                         tm.mark_candidate_processing(task_id, candidate_ext_id(cand))
                     except Exception:
                         pass
+
                 download_result = download_single_resume(
-                    context, page, name, download_path, i, ai_config, job_name
+                    driver, site, name, download_dir, i, ai_config, job_name
                 )
                 # 失败重试一次（AI明确不通过/页面无文本时不重试）
                 if (not download_result.get('success')
@@ -379,7 +376,7 @@ def run(candidates, download_dir, job_name='', ai_config=None,
                         and download_result.get('ai_retryable', True)):
                     time.sleep(2)
                     download_result = download_single_resume(
-                        context, page, name, download_path, i, ai_config, job_name
+                        driver, site, name, download_dir, i, ai_config, job_name
                     )
                 download_result['page'] = 1
                 all_results.append(download_result)
@@ -400,233 +397,14 @@ def run(candidates, download_dir, job_name='', ai_config=None,
     return result
 
 
-def collect_current_candidates(page):
-    """读取当前 DOM 中的候选人（含学校/专业/学历）；读取失败返回 None"""
-    try:
-        return page.evaluate('''() => {
-            const items = document.querySelectorAll('.item.virtual_list');
-            const candidates = [];
-            items.forEach(item => {
-                let name = '';
-                let school = '';
-                let major = '';
-                let education = '';
-
-                const nameEl = item.querySelector('.detail .firstline .name')
-                    || item.querySelector('.name');
-                if (nameEl) {
-                    name = nameEl.textContent.trim();
-                }
-
-                const schoolEl = item.querySelector('.school_name');
-                if (schoolEl) {
-                    school = schoolEl.textContent.trim();
-                }
-
-                const majorEl = item.querySelector('.major_name');
-                if (majorEl) {
-                    major = majorEl.textContent.trim();
-                }
-
-                const detailEl = item.querySelector('.name.context-detail');
-                if (detailEl) {
-                    const spans = detailEl.querySelectorAll('span[title]');
-                    spans.forEach(span => {
-                        const title = span.getAttribute('title');
-                        if (title && (title === '本科' || title === '硕士' || title === '博士' || title === '大专' || title === '专科')) {
-                            education = title;
-                        }
-                    });
-                }
-
-                if (name && name.length > 0 && name.length < 20 && name !== ' ') {
-                    candidates.push({
-                        name: name,
-                        school: school,
-                        major: major,
-                        education: education
-                    });
-                }
-            });
-            return candidates;
-        }''')
-    except Exception:
-        return None
-
-
-def read_total_pages(page):
-    """从分页控件读取真实总页数（问题3：total_pages 修复）"""
-    try:
-        return page.evaluate('''() => {
-            let totalPages = 1;
-            const items = document.querySelectorAll('.eh-pagination__pagelist li');
-            for (const el of items) {
-                const n = parseInt(el.textContent.trim());
-                if (!isNaN(n) && n > totalPages) totalPages = n;
-            }
-            const totalEl = document.querySelector('.eh-pagination__total');
-            if (totalEl) {
-                const match = totalEl.textContent.match(/\\d+/);
-                if (match) {
-                    const calc = Math.ceil(parseInt(match[0]) / 50);
-                    if (calc > totalPages) totalPages = calc;
-                }
-            }
-            return totalPages;
-        }''')
-    except Exception:
-        return None
-
-
-def collect_all_candidates_with_scroll(page):
-    """滚动获取当前页所有候选人（保留，供 CLI/调试使用）"""
-    all_candidates = []
-    seen = set()
-    no_new_count = 0
-
-    try:
-        page.mouse.move(600, 400)
-        time.sleep(0.5)
-    except Exception:
-        pass
-
-    for round_num in range(100):
-        current = collect_current_candidates(page)
-        if current is None:
-            break
-
-        new_count = 0
-        for candidate in current:
-            name = candidate['name']
-            if name not in seen:
-                seen.add(name)
-                all_candidates.append(candidate)
-                new_count += 1
-
-        if new_count > 0:
-            no_new_count = 0
-        else:
-            no_new_count += 1
-
-        if no_new_count >= 3:
-            break
-
-        try:
-            page.mouse.wheel(0, 600)
-            time.sleep(1)
-        except Exception:
-            break
-
-    return all_candidates
-
-
-def scroll_to_pagination(page):
-    """滚动到分页控件（优先 scroll_into_view，问题10：减少固定等待）"""
-    try:
-        el = page.query_selector('.eh-pagination, .eh-pagination__next, .pagination')
-        if el:
-            try:
-                el.scroll_into_view_if_needed(timeout=3000)
-                time.sleep(0.5)
-                return
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # 兜底：少量滚轮
-    for _ in range(5):
-        try:
-            page.mouse.wheel(0, 800)
-            time.sleep(0.3)
-        except Exception:
-            break
-
-
-def has_next_page(page):
-    """检查是否有下一页"""
-    try:
-        result = page.evaluate('''() => {
-            const nextBtn = document.querySelector('.eh-pagination__next.btn-next, .eh-pagination .btn-next');
-            if (!nextBtn) return false;
-            return !(nextBtn.disabled || nextBtn.hasAttribute('disabled'));
-        }''')
-        return result
-    except Exception:
-        return False
-
-
-def go_to_next_page(page):
-    """点击下一页（问题10：用当前页码变化判断翻页成功，替代 30 秒首名轮询）"""
-    try:
-        current_page = page.evaluate('''() => {
-            const active = document.querySelector('.eh-pagination__pagelist li.active, .eh-pagination li.active');
-            if (active) {
-                const n = parseInt(active.textContent.trim());
-                if (!isNaN(n)) return n;
-            }
-            return 0;
-        }''')
-
-        old_first = page.evaluate('''() => {
-            const items = document.querySelectorAll('.item.virtual_list');
-            if (items.length === 0) return '';
-            const nameEl = items[0].querySelector('.detail .firstline .name');
-            return nameEl ? nameEl.textContent.trim() : '';
-        }''')
-
-        clicked = page.evaluate('''() => {
-            const nextBtn = document.querySelector('.eh-pagination__next.btn-next, .eh-pagination .btn-next');
-            if (!nextBtn) return false;
-            nextBtn.click();
-            return true;
-        }''')
-
-        if not clicked:
-            return False
-
-        # 等待页面刷新（最多 10 秒）
-        for _ in range(20):
-            time.sleep(0.5)
-
-            # 方式1：当前页码变化
-            if current_page:
-                try:
-                    now_page = page.evaluate('''() => {
-                        const active = document.querySelector('.eh-pagination__pagelist li.active, .eh-pagination li.active');
-                        if (active) {
-                            const n = parseInt(active.textContent.trim());
-                            if (!isNaN(n)) return n;
-                        }
-                        return 0;
-                    }''')
-                    if now_page and now_page != current_page:
-                        return True
-                except Exception:
-                    pass
-
-            # 方式2：首名变化（页码取不到时兜底）
-            new_first = page.evaluate('''() => {
-                const items = document.querySelectorAll('.item.virtual_list');
-                if (items.length === 0) return '';
-                const nameEl = items[0].querySelector('.detail .firstline .name');
-                return nameEl ? nameEl.textContent.trim() : '';
-            }''')
-            if new_first and new_first != old_first:
-                return True
-
-        return False
-    except Exception:
-        return False
-
-
-def download_single_resume(context, page, candidate_name, download_dir, index, ai_config=None, job_name=""):
-    """下载单个候选人简历"""
+def download_single_resume(driver, site, candidate_name, download_dir, index,
+                           ai_config=None, job_name=""):
+    """下载单个候选人简历（打开详情 -> 附件 -> AI 判断 -> 下载，流程与原实现一致）"""
     result = {"success": False, "name": candidate_name, "file_path": "", "error": "", "ai_pass": None}
 
-    def ai_check(page_for_text):
+    def ai_check(page_driver):
         """AI 评估：通过返回 True；不通过/无法评估返回 False（结果写入 result）"""
-        resume_text = read_resume_text(page_for_text)
+        resume_text = site.extract_resume_text(page_driver)
         if not resume_text:
             result["ai_pass"] = None
             result["ai_reason"] = "无法读取简历文本"
@@ -649,305 +427,208 @@ def download_single_resume(context, page, candidate_name, download_dir, index, a
         return True
 
     try:
-        # 查找候选人元素
-        element = find_candidate_by_name(page, candidate_name)
+        # 定位候选人元素（站点能力）
+        element = site.find_candidate_by_name(driver, candidate_name)
         if not element:
             result["error"] = "元素未找到"
             return result
 
-        # 滚动到该元素
+        # 尝试多种方式打开简历详情（流程与原实现逐行一致）
+        detail_page = None
         try:
-            element.scroll_into_view_if_needed(timeout=5000)
             time.sleep(0.5)
         except Exception:
             pass
 
-        # 点击候选人：优先用 expect_popup 捕获新标签页/弹窗；
-        # 兼容同页跳转（SPA）与姓名元素点击
-        pages_before = len(context.pages)
-        url_before = page.url
-        detail_page = None
-
+        pages_before = len(driver.context_pages())
+        url_before = driver.page_url()
         try:
-            with page.expect_popup(timeout=5000) as popup_info:
+            with driver.expect_popup(timeout=5000) as popup_info:
                 element.click()
-            detail_page = popup_info.value
         except Exception:
             pass
 
-        # 未捕获到弹窗：等待新页面或同页跳转
         for _ in range(8):
             if detail_page is not None:
                 break
             time.sleep(0.5)
-            if len(context.pages) > pages_before:
-                detail_page = context.pages[-1]
-                break
-            try:
-                if page.url != url_before:      # 同页跳转（SPA 打开详情）
-                    detail_page = page
-                    break
-            except Exception:
-                pass
+            if len(driver.context_pages()) > pages_before:
+                detail_page = driver.context_pages()[-1]
+
+        try:
+            if driver.page_url() != url_before:      # 同页跳转（SPA 打开详情）
+                detail_page = driver.page
+        except Exception:
+            pass
 
         if detail_page is None:
-            # 兜底：点击姓名元素（部分页面点击行为挂在姓名上）
+            # 点击姓名字素
             try:
-                name_el = find_name_element(page, candidate_name)
+                name_el = site.find_name_element(driver, candidate_name)
                 if name_el:
                     name_el.click()
                     for _ in range(8):
                         time.sleep(0.5)
-                        if len(context.pages) > pages_before:
-                            detail_page = context.pages[-1]
-                            break
-                        try:
-                            if page.url != url_before:
-                                detail_page = page
-                                break
-                        except Exception:
-                            pass
+                        if len(driver.context_pages()) > pages_before:
+                            detail_page = driver.context_pages()[-1]
+                    try:
+                        if driver.page_url() != url_before:
+                            detail_page = driver.page
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
         if detail_page is None:
-            # 兜底：当前页已异步渲染成详情
+            # 检查当前页是否已有附件入口（同页详情）
             try:
-                has_detail = page.evaluate('''() => {
-                    const q = (s) => !!document.querySelector(s);
-                    return q('.attach_resume_item') || q('#attachment') ||
-                           !!(document.body && document.body.innerText.includes('附件个人信息'));
-                }''')
+                has_detail = driver.query_selector(site.selector('attachment_btn'))
                 if has_detail:
-                    detail_page = page
+                    detail_page = driver.page
             except Exception:
                 pass
 
         if detail_page is None:
             try:
-                cur_url = page.url
-                cur_title = page.title()
+                cur_url = driver.page_url()
+                cur_title = driver.page_title()
             except Exception:
-                cur_url = cur_title = ''
+                cur_url = ''
+                cur_title = ''
             result["error"] = f"未打开新标签页（url={cur_url[:90]} title={cur_title[:40]}）"
             return result
 
-        # 尝试查找附件个人信息入口（页面异步加载，最多等12秒）
-        attachment_btn = find_attachment_button(detail_page, timeout=12)
+        detail_driver = BrowserDriver(detail_page)
 
+        # 找附件按钮（站点能力）
+        attachment_btn = site.find_attachment_button(detail_driver, timeout=12)
         if not attachment_btn:
-            # 保存页面诊断信息，并把诊断摘要直接带回结果
-            diag = save_attachment_debug(detail_page, candidate_name)
+            diag = save_attachment_debug(detail_driver, site, candidate_name)
             result["error"] = f"未找到附件按钮（诊断: {diag}）"
-            detail_page.close()
+            driver.close_page(detail_page)
             return result
 
-        # 点击附件按钮
-        pages_before_attach = len(context.pages)
-        attachment_btn.click()
-
-        pages_after = context.pages
-        # 等待新标签页出现（最多 5 秒，问题10：替代固定 sleep(2)）
+        # 打开附件页
+        pages_before_attach = len(driver.context_pages())
+        pages_after = driver.context_pages()
+        try:
+            attachment_btn.click()
+        except Exception:
+            pass
         for _ in range(10):
-            if len(context.pages) > pages_before_attach:
-                pages_after = context.pages
+            if len(driver.context_pages()) > pages_before_attach:
+                pages_after = driver.context_pages()
                 break
             time.sleep(0.5)
 
         if len(pages_after) > pages_before_attach:
+            # 附件页打开成功
             attach_page = pages_after[-1]
-
-            # 等待下载按钮出现
-            download_selectors = [
-                '.btn_item_download .download_a',
-                '.download_a',
-                'a.download_a',
-                '[class*="download"] a',
-                'a:has-text("下载")',
-                '.btn_item:has-text("下载")',
-            ]
-            download_btn = wait_for_element(attach_page, download_selectors, timeout=15)
-
-            # AI 筛选
+            attach_driver = BrowserDriver(attach_page)
+            download_btn = site.find_download_button(attach_driver, timeout=15)
             if download_btn and ai_config and ai_config.get("enabled"):
-                if not ai_check(attach_page):
-                    attach_page.close()
+                if not ai_check(attach_driver):
+                    driver.close_page(attach_page)
                     time.sleep(0.5)
-                    detail_page.close()
+                    driver.close_page(detail_page)
                     time.sleep(0.5)
                     return result
-
             if download_btn:
                 try:
-                    with attach_page.expect_download(timeout=20000) as download_info:
+                    with attach_driver.expect_download(timeout=20000) as download_info:
                         download_btn.click()
-
                     download = download_info.value
                     suggested_name = download.suggested_filename
-
                     if suggested_name:
-                        ext = Path(suggested_name).suffix or '.pdf'
-                        filename = f"51job-{candidate_name}_{job_name}{ext}"
+                        filename = suggested_name
                     else:
-                        filename = f"51job-{candidate_name}_{job_name}.pdf"
-
-                    file_path = download_dir / filename
+                        ext = '.pdf'
+                        filename = f"{candidate_name}_{index}{ext}"
+                    file_path = Path(download_dir) / filename
                     download.save_as(str(file_path))
-
                     result["success"] = True
                     result["file_path"] = str(file_path)
-
                 except Exception as e:
                     result["error"] = f"下载失败: {e}"
             else:
                 result["error"] = "未找到下载按钮"
-
-            attach_page.close()
+            driver.close_page(attach_page)
             time.sleep(0.5)
-
         else:
-            # 弹窗模式
-            download_selectors = [
-                '.btn_item_download .download_a',
-                '.download_a',
-                'a.download_a',
-                '[class*="download"] a',
-            ]
-            download_btn = wait_for_element(detail_page, download_selectors, timeout=10)
-
-            # AI 筛选
+            # 附件页未打开，直接在当前详情页找下载按钮（兜底）
+            download_btn = site.find_download_button(detail_driver, timeout=10)
             if download_btn and ai_config and ai_config.get("enabled"):
-                if not ai_check(detail_page):
-                    detail_page.close()
+                if not ai_check(detail_driver):
+                    driver.close_page(detail_page)
                     time.sleep(0.5)
                     return result
-
             if download_btn:
                 try:
-                    with detail_page.expect_download(timeout=20000) as download_info:
+                    with detail_driver.expect_download(timeout=20000) as download_info:
                         download_btn.click()
-
                     download = download_info.value
                     suggested_name = download.suggested_filename
-
                     if suggested_name:
-                        ext = Path(suggested_name).suffix or '.pdf'
-                        filename = f"51job-{candidate_name}_{job_name}{ext}"
+                        filename = suggested_name
                     else:
-                        filename = f"51job-{candidate_name}_{job_name}.pdf"
-
-                    file_path = download_dir / filename
+                        ext = '.pdf'
+                        filename = f"{candidate_name}_{index}{ext}"
+                    file_path = Path(download_dir) / filename
                     download.save_as(str(file_path))
-
                     result["success"] = True
                     result["file_path"] = str(file_path)
-
                 except Exception as e:
                     result["error"] = f"下载失败: {e}"
             else:
                 result["error"] = "未找到下载按钮"
-
-        detail_page.close()
-        time.sleep(0.5)
+            driver.close_page(detail_page)
+            time.sleep(0.5)
 
     except Exception as e:
         result["error"] = str(e)
-        # 清理打开的页面
-        try:
-            while len(context.pages) > 1:
-                context.pages[-1].close()
-                time.sleep(0.5)
-        except Exception:
-            pass
+
+    # 清理多余页面（保留主页面）
+    try:
+        while len(driver.context_pages()) > 1:
+            driver.close_page(driver.context_pages()[-1])
+            time.sleep(0.5)
+    except Exception:
+        pass
 
     return result
 
 
-def find_attachment_button(detail_page, timeout=12):
-    """
-    查找详情页“附件个人信息”入口。
-
-    页面异步加载，最多轮询 timeout 秒；支持：
-    - 真实结构：div.attach_resume_item（含图标 + 文本“附件个人信息”），优先返回该容器
-    - 直接可见的文本元素
-    - 文本位于隐藏 tooltip（Element UI el-tooltip）时，向上找可见的祖先触发元素
-    """
-    selectors = [
-        '.attach_resume_item:has-text("附件个人信息")',
-        '.attach_resume_item',
-        'span:has-text("附件个人信息")',
-        ':text("附件个人信息")',
-        'span:text-is("附件个人信息")',
-        '[title*="附件个人信息"]',
-        '[aria-label*="附件个人信息"]',
-        '.el-tooltip:has-text("附件个人信息")',
-        '[class*="attachment"]:has-text("附件个人信息")',
-    ]
-    for _ in range(timeout):
-        for sel in selectors:
-            try:
-                el = detail_page.query_selector(sel)
-                if not el:
-                    continue
-                # 容器元素直接作为点击目标（图标+文本的父容器）
-                if sel.startswith('.attach_resume_item'):
-                    return el
-                if el.is_visible():
-                    return el
-                # 文本元素不可见时，向上找可见的可点击祖先（tooltip 图标场景）
-                try:
-                    handle = el.evaluate_handle('''(el) => {
-                        let p = el;
-                        while (p) {
-                            if (p.offsetParent !== null &&
-                                ['DIV', 'IMG', 'A', 'BUTTON', 'SPAN'].includes(p.tagName)) {
-                                return p;
-                            }
-                            p = p.parentElement;
-                        }
-                        return null;
-                    }''')
-                    ancestor = handle.as_element() if handle else None
-                    if ancestor and ancestor.is_visible():
-                        return ancestor
-                except Exception:
-                    pass
-            except Exception:
-                continue
-        time.sleep(1)
-    return None
-
-
-def save_attachment_debug(detail_page, candidate_name) -> str:
-    """
-    附件入口未找到时，保存页面关键片段到 logs/，并返回诊断摘要。
-
-    Returns:
-        诊断摘要字符串（attach_item 数量 / 文本是否包含 / url / title）
-    """
+def save_attachment_debug(driver, site, candidate_name) -> str:
+    """附件入口未找到时，保存页面关键片段到 logs/，并返回诊断摘要"""
     try:
         import re as _re
-        snippet = detail_page.evaluate('''() => {
-            const parts = [];
-            const attachItems = document.querySelectorAll('.attach_resume_item');
-            parts.push('ATTACH_ITEMS: ' + attachItems.length);
-            parts.push('ATTACH_ITEM_HTML: ' + (attachItems[0] ? attachItems[0].outerHTML.substring(0, 1500) : ''));
-            const attach = document.querySelector('#attachment');
-            if (attach) parts.push('ID_ATTACHMENT: ' + attach.outerHTML.substring(0, 4000));
-            const tooltips = document.querySelectorAll('.el-tooltip, [class*="attachment"], [title*="附件"]');
-            parts.push('TOOLTIPS: ' + Array.from(tooltips).slice(0, 10)
-                .map(e => e.outerHTML.substring(0, 400)).join('\\n'));
-            parts.push('URL: ' + location.href);
-            parts.push('TEXT: ' + (document.body ? document.body.innerText.substring(0, 800) : ''));
-            return parts.join('\\n-----\\n');
-        }''')
+        # 收集附件相关元素（站点 selector 由 SiteAdapter 提供）
+        attach_els = driver.query_selector_all(site.selector('attachment_btn'))
+        snippet_parts = []
+        snippet_parts.append(f"ATTACH_ITEMS: {len(attach_els)}")
+        if attach_els:
+            try:
+                snippet_parts.append("ATTACH_ITEM_HTML: " + attach_els[0].inner_html()[:1500])
+            except Exception:
+                pass
+        body_text = ''
+        try:
+            body_text = driver.evaluate("() => document.body ? document.body.innerText.substring(0, 800) : ''") or ''
+        except Exception:
+            pass
+        snippet_parts.append("URL: " + driver.page_url())
+        snippet_parts.append("TEXT: " + str(body_text)[:800])
+        snippet = "\n-----\n".join(snippet_parts)
+
         diag_parts = []
         if snippet:
             for line in snippet.splitlines()[:3]:
-                diag_parts.append(line.split(':', 1)[0] + '=' + (line.split(':', 1)[1] if ':' in line else ''))
+                key = line.split(':', 1)[0]
+                val = line.split(':', 1)[1] if ':' in line else ''
+                diag_parts.append(f"{key}={val}")
         try:
-            url = detail_page.url or ''
-            title = detail_page.title() or ''
+            url = driver.page_url()
+            title = driver.page_title()
         except Exception:
             url = title = ''
         summary = ' | '.join(diag_parts)
@@ -962,92 +643,6 @@ def save_attachment_debug(detail_page, candidate_name) -> str:
         return summary
     except Exception:
         return "诊断生成失败"
-
-
-def find_candidate_by_name(page, name):
-    """根据姓名查找候选人元素"""
-    try:
-        index = page.evaluate('''(name) => {
-            const items = document.querySelectorAll('.item.virtual_list');
-            for (let i = 0; i < items.length; i++) {
-                const nameEl = items[i].querySelector('.detail .firstline .name') || items[i].querySelector('.name');
-                if (nameEl && nameEl.textContent.trim() === name) {
-                    return i;
-                }
-            }
-            return -1;
-        }''', name)
-
-        if index >= 0:
-            items = page.query_selector_all('.item.virtual_list')
-            if index < len(items):
-                return items[index]
-    except Exception:
-        pass
-
-    return None
-
-
-def find_name_element(page, name):
-    """根据姓名查找候选人姓名元素（点击兜底用）"""
-    try:
-        index = page.evaluate('''(name) => {
-            const items = document.querySelectorAll('.item.virtual_list');
-            for (let i = 0; i < items.length; i++) {
-                const nameEl = items[i].querySelector('.detail .firstline .name') || items[i].querySelector('.name');
-                if (nameEl && nameEl.textContent.trim() === name) {
-                    return i;
-                }
-            }
-            return -1;
-        }''', name)
-        if index >= 0:
-            items = page.query_selector_all('.item.virtual_list')
-            if index < len(items):
-                return (
-                    items[index].query_selector('.detail .firstline .name')
-                    or items[index].query_selector('.name')
-                )
-    except Exception:
-        pass
-    return None
-
-
-def wait_for_element(page, selectors, timeout=15):
-    """等待元素出现"""
-    for _ in range(timeout):
-        for sel in selectors:
-            try:
-                el = page.query_selector(sel)
-                if el and el.is_visible():
-                    return el
-            except Exception:
-                continue
-        time.sleep(1)
-    return None
-
-
-def read_resume_text(page):
-    """读取简历文本"""
-    try:
-        text = page.evaluate('''() => {
-            const selectors = [
-                '.resume-content', '.resume-detail', '.resume-preview',
-                '.attachment-content', '.file-content', '.pdf-content',
-                '[class*="resume"]', '[class*="preview"]', '[class*="detail"]'
-            ];
-            for (const sel of selectors) {
-                const el = document.querySelector(sel);
-                if (el && el.innerText.trim().length > 100) {
-                    return el.innerText.trim().substring(0, 8000);
-                }
-            }
-            const body = document.body.innerText.trim();
-            return body.substring(0, 8000);
-        }''')
-        return text
-    except Exception:
-        return ""
 
 
 def evaluate_resume(resume_text, match_description, api_key):
@@ -1083,7 +678,6 @@ def evaluate_resume(resume_text, match_description, api_key):
                 max_tokens=max_tokens,
                 timeout=60,
             )
-
             content = (completion.choices[0].message.content or "").strip()
             if not content:
                 last_error = "模型未返回内容（推理过长）"

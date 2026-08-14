@@ -50,6 +50,48 @@ class BrowserDriver:
         selector = self._resolve(target)
         self.page.hover(selector, timeout=timeout)
 
+    def query_selector(self, selector: str):
+        """通用：按 CSS 选择器查找元素（返回 Playwright element 或 None）"""
+        try:
+            return self.page.query_selector(selector)
+        except Exception:
+            return None
+
+    def query_selector_all(self, selector: str) -> list:
+        try:
+            return self.page.query_selector_all(selector)
+        except Exception:
+            return []
+
+    def click_element(self, element):
+        """通用：点击已定位的元素"""
+        if element is None:
+            return False
+        try:
+            element.click()
+            return True
+        except Exception:
+            return False
+
+    def scroll_into_view(self, element, timeout: int = 3000):
+        try:
+            element.scroll_into_view_if_needed(timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    def wait_for_element(self, selectors, timeout: int = 15):
+        """通用：依次尝试 selectors 直到找到元素（对齐 download_worker 原逻辑）"""
+        import time as _time
+        deadline = _time.time() + timeout
+        for sel in selectors:
+            while _time.time() < deadline:
+                el = self.query_selector(sel)
+                if el is not None:
+                    return el
+                _time.sleep(0.3)
+        return None
+
     # ---------------- 等待 ----------------
 
     def wait_for_selector(self, target: str, timeout: int = 10000, state='visible'):
@@ -61,6 +103,41 @@ class BrowserDriver:
 
     def sleep(self, seconds: float):
         time.sleep(seconds)
+
+    # ---------------- 弹窗 / 下载 / 上下文 ----------------
+
+    def expect_popup(self, timeout: int = 5000):
+        """通用：监听新标签页弹出（返回 context manager）"""
+        return self.page.expect_popup(timeout=timeout)
+
+    def expect_download(self, timeout: int = 20000):
+        """通用：监听下载事件（返回 context manager）"""
+        return self.page.expect_download(timeout=timeout)
+
+    def context_pages(self) -> list:
+        """通用：当前浏览器上下文的所有页面"""
+        try:
+            return list(self.page.context.pages)
+        except Exception:
+            return []
+
+    def page_url(self) -> str:
+        try:
+            return self.page.url
+        except Exception:
+            return ''
+
+    def page_title(self) -> str:
+        try:
+            return self.page.title()
+        except Exception:
+            return ''
+
+    def close_page(self, page):
+        try:
+            page.close()
+        except Exception:
+            pass
 
     # ---------------- 提取 / 执行 ----------------
 
