@@ -1,5 +1,38 @@
 # GUI改造进度说明
 
+## 2026-08-14 浏览器自动化架构重构（Phase 1 ~ 4B，分支 codex/browser-actions-refactor）
+
+### 重构目标与成果
+- 把 51job 浏览器自动化从"巨型页面 + 硬编码"重构为分层架构
+- 完整架构见 `docs/ARCHITECTURE.md`
+
+### 分层落地
+- **Controller 层**：BrowserController / TaskController / DownloadController（页面只做 UI + QTimer + 编排）
+- **Service 层**：CandidateService（历史/external_id 去重/学校过滤/导出）
+- **Workflow 层**（bizflow/）：ResumeCollectionWorkflow（采集）/ ResumeDownloadWorkflow（下载）
+- **站点层**：SiteAdapter（Site51Job 真实 / SiteBoss 骨架验证跨站点复用）
+- **浏览器底座**：BrowserDriver / Actions / TargetResolver（8 个原子动作）
+- download_worker.py：1104 → 86 行薄壳；browser_worker.py 薄壳化
+
+### 关键验收
+- automation_page 51job 知识清零（PageDetector/selector/JS = 0）
+- 页面 Task DB 直连清零（self.db.get_task 等 = 0）
+- 张婉婷真实下载黄金回归：704627 字节与重构前逐字节一致
+- 带 AI 真实回归：AI 通过 → 下载成功（张婉婷 ai_pass=True）
+- SiteBoss 骨架 Contract Test：同一 Workflow 驱动两个站点，源码零站点判断
+
+### 打包相关
+- 修复 `workflow/` 模块名与 PyInstaller `hook-workflow.py` 冲突 → 重命名 `bizflow/`
+- 新增 onedir 打包配置 `build_gui_onedir.spec`（解决单文件自解压慢/安全软件拦截）
+- onedir 输出 `dist/林林专属助手/`（19MB 启动器 + _internal 依赖，约 433MB）
+
+### 用户环境排查（待确认）
+- 对方 Win10 1511（2015 版）+ 公司安全软件（aTrust + 终端防护中心）
+- 单文件 exe 双击无反应（无 startup.log）→ 疑似安全软件拦截
+- onedir 版有 startup.log 但报 `DLL load failed while importing QtWidgets`
+- 已让用户：7-Zip 重新压缩 + 安装 VC++ 2015-2022 x64 运行库后重试
+- 待用户反馈结果
+
 ## 已完成功能
 
 ### 1. 基础GUI框架 (PyQt6)
