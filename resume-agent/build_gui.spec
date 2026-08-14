@@ -43,6 +43,7 @@ a = Analysis(
         ('crawler/*.py', 'crawler'),
         ('db/*.py', 'db'),
         ('task/*.py', 'task'),
+        ('workflow/*.py', 'workflow'),
         ('wechat/*.py', 'wechat'),
         ('gui/pages/*.py', 'gui/pages'),
         ('main.py', '.'),

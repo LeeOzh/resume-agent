@@ -7,5 +7,7 @@ ResumeCollectionWorkflow 只负责"怎么采集"（登录分支/滚动循环/去
 """
 
 from .resume_collection import CollectionResult, ResumeCollectionWorkflow
+from .resume_download import ResumeDownloadWorkflow, evaluate_resume
 
-__all__ = ['CollectionResult', 'ResumeCollectionWorkflow']
+__all__ = ['CollectionResult', 'ResumeCollectionWorkflow',
+           'ResumeDownloadWorkflow', 'evaluate_resume']
