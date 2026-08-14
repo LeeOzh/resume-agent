@@ -7,21 +7,21 @@
 
 ```mermaid
 graph TB
-    subgraph 入口
+    subgraph "入口"
         MG["main_gui.py<br/>GUI 入口"]
     end
 
-    subgraph 巨型层
+    subgraph "巨型层"
         AP["gui/pages/automation_page.py（1619 行）<br/>原 MainWindow 业务整体搬入<br/>UI+业务+DB+进程+浏览器全混"]
     end
 
-    subgraph 业务层（51job 硬编码）
+    subgraph "业务层（51job 硬编码）"
         BW["browser_worker.py（266 行）<br/>51job selector/JS/PageDetector 直连"]
         DW["download_worker.py（1104 行）<br/>51job selector + 全部下载流程 + 浏览器操作"]
         PD["browser/page_detector.py<br/>51job 页面检测硬编码"]
     end
 
-    subgraph 基础层
+    subgraph "基础层"
         BM["browser/browser_manager.py<br/>生命周期（较通用）"]
         TM["task/task_manager.py<br/>领域层（较健康）"]
         DB["db/database.py<br/>SQLite"]
@@ -47,42 +47,42 @@ graph TB
 
 ```mermaid
 graph TB
-    subgraph 入口
+    subgraph "入口"
         MG["main_gui.py<br/>GUI 入口"]
     end
 
-    subgraph GUI 层（瘦身）
+    subgraph "GUI 层（瘦身）"
         AP["automation_page.py<br/>UI + QTimer + Controller 编排<br/>零 51job 知识、零 DB 直连"]
         WP["wechat_page.py<br/>微信简历（独立模块）"]
     end
 
-    subgraph Controller 层
+    subgraph "Controller 层"
         BC["BrowserController<br/>浏览器状态 + refresh 进程 + 站点操作"]
         TC["TaskController<br/>任务生命周期薄封装"]
         DC["DownloadController<br/>下载进程/Queue/Event"]
     end
 
-    subgraph Service 层
+    subgraph "Service 层"
         CS["CandidateService<br/>历史/external_id 去重/学校过滤/导出"]
     end
 
-    subgraph Workflow 层（bizflow/）
+    subgraph "Workflow 层（bizflow/）"
         CW["ResumeCollectionWorkflow<br/>采集流程（登录/滚动/去重/终止）"]
         DW2["ResumeDownloadWorkflow<br/>下载流程（翻页/详情/AI/下载/结果）"]
     end
 
-    subgraph 站点层
+    subgraph "站点层"
         SA["SiteAdapter<br/>抽象（URL/selector/检测/提取/下载能力）"]
         S51["Site51Job"]
         SB["SiteBoss（骨架）"]
     end
 
-    subgraph 浏览器底座
+    subgraph "浏览器底座"
         BD["BrowserDriver<br/>浏览器操作薄封装"]
         AC["Actions / TargetResolver<br/>ActionContext / ActionRunner"]
     end
 
-    subgraph 基础层
+    subgraph "基础层"
         BM["BrowserManager<br/>生命周期（启动/连接/重连）"]
         TM["TaskManager<br/>任务/候选人状态机（领域）"]
         DB["db/database.py<br/>SQLite"]
