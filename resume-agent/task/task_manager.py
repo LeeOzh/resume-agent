@@ -111,6 +111,10 @@ class TaskManager:
         """UPSERT 候选人到 task_candidates（立即保存，不批量）"""
         return self.db.add_candidate(task_id, candidate)
 
+    def add_candidates_batch(self, task_id: int, candidates: List[dict]) -> int:
+        """批量写入候选人（任务创建时的单页模式预写）"""
+        return self.db.add_candidates_batch(task_id, candidates)
+
     def mark_candidate_processing(self, task_id: int, external_id: str):
         self.db.update_candidate_status(task_id, external_id, CAND_PROCESSING)
         self.log(task_id, EVENT_CANDIDATE_PROCESSING, f'开始处理候选人 {external_id[:12]}...',

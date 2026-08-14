@@ -35,16 +35,6 @@ else:
     _BASE_DIR = Path(__file__).parent.parent.parent
 
 
-def refresh_worker_target(queue, switch_job):
-    """刷新候选人子进程目标函数"""
-    try:
-        from browser_worker import run
-        result = run(switch_job)
-        queue.put(result)
-    except Exception as e:
-        queue.put({'success': False, 'error': str(e)})
-
-
 def download_worker_target(queue, candidates, download_dir, job_name,
                            ai_config, download_all_pages, stop_event, task_id=None,
                            pause_event=None, db_path=None):
@@ -92,6 +82,10 @@ class AutomationPage(QWidget):
 
         # 窗口级共享引用（状态栏标签 / 刷新按钮 / 浏览器监控线程）
         self.db = main.db
+        from gui.controllers import TaskController
+        self.task_controller = TaskController()
+        from gui.services import CandidateService
+        self.candidate_service = CandidateService(self.db)
         self.candidate_count_label = main.candidate_count_label
         self.download_count_label = main.download_count_label
         self.ai_status_label = main.ai_status_label
@@ -99,38 +93,35 @@ class AutomationPage(QWidget):
         self.task_status_label = main.task_status_label
         self.toolbar_refresh_btn = main.toolbar_refresh_btn
         self.browser_monitor = main.browser_monitor
+        from gui.controllers import BrowserController
+        self.browser_controller = BrowserController(
+            on_event=self._on_browser_event,
+            monitor=self.browser_monitor,
+        )
+        from gui.controllers import DownloadController
+        self.download_controller = DownloadController(monitor=self.browser_monitor)
 
         # 业务状态（原 MainWindow 全部搬入，逻辑不变）
         self.candidates = []
-        self.worker_process = None
-        self.allowed_schools = set()
         self.school_filter_enabled = False
         self.school_list_path = ""
         self.positions = []
         self.current_job = ""
         self.total_pages = 1
         self.current_page_url = ""          # 当前候选人列表URL（存入任务）
-        self.page_type = ''                 # 当前页面类型（PageDetector）
+        self.page_type = ''                 # 当前页面类型（经 BrowserController）
         self.login_status = ''              # 当前登录状态
-        self.candidate_history = {}         # 候选人历史处理记录（external_id -> record）
-
         self._db_threads = []               # 持有 DB 后台线程引用，防止 QThread 被 GC 导致闪退
         self.current_task_id = None
         self.last_task_id = None
         self.current_task_obj = None
         self.current_task = None
 
-        # 浏览器管理（GUI侧状态显示；监控与重连由后台线程负责）
-        self.browser_manager = None
+        # 浏览器管理（BrowserController 持有页面侧 BrowserManager；监控与重连由后台线程负责）
         self.browser_state = 'DISCONNECTED'
-
-        # 跨进程中断信号
-        self.stop_event = multiprocessing.Event()
-        self.pause_event = multiprocessing.Event()
 
         self.check_timer = QTimer()
         self.check_timer.timeout.connect(self.check_worker_status)
-        self.result_queue = None
         self.worker_start_time = None
         self._progress_anim = None
         self._unfinished_checked = False
@@ -333,7 +324,7 @@ class AutomationPage(QWidget):
 
     def shutdown(self) -> bool:
         """退出前清理；返回 False 表示用户取消退出"""
-        if self.worker_process and self.worker_process.is_alive():
+        if self.download_controller.is_worker_alive():
             reply = QMessageBox.question(
                 self, "确认退出",
                 "有任务正在运行，确定要退出吗？",
@@ -342,10 +333,12 @@ class AutomationPage(QWidget):
             if reply == QMessageBox.StandardButton.No:
                 return False
             # 中断下载
-            self.stop_event.set()
-            self.worker_process.join(timeout=5)
-            if self.worker_process.is_alive():
-                self.worker_process.terminate()
+            self.download_controller.stop()
+            self.download_controller.shutdown_worker()
+
+        # 结束刷新子进程（BrowserController 管理）
+        if self.browser_controller.is_worker_alive():
+            self.browser_controller.kill_worker()
 
         # 等待数据库后台线程结束（防止退出时 QThread 仍在运行导致 abort）
         for thread in list(self._db_threads):
@@ -353,6 +346,8 @@ class AutomationPage(QWidget):
                 thread.wait(3000)
             except Exception:
                 pass
+        # 等待任务控制器线程结束（任务完成/失败异步更新）
+        self.task_controller.shutdown(timeout_ms=3000)
         return True
 
     # ---------------- 学校名单 ----------------
@@ -406,21 +401,17 @@ class AutomationPage(QWidget):
 
     def load_school_list(self, file_path):
         """加载学校名单"""
-        try:
-            import pandas as pd
-            df = pd.read_excel(file_path)
-            self.allowed_schools = set()
-            for _, row in df.iterrows():
-                name = str(row.get('学校名称', '')).strip()
-                if name and name != 'nan':
-                    self.allowed_schools.add(name)
-            self.school_count_label.setText(f"已加载 {len(self.allowed_schools)} 所可录用学校")
+        ok = self.candidate_service.load_school_list(file_path)
+        if ok:
+            self.school_count_label.setText(
+                f"已加载 {self.candidate_service.school_count()} 所可录用学校"
+            )
             self.school_count_label.setStyleSheet("color: green;")
-            return True
-        except Exception as e:
-            self.school_count_label.setText(f"加载失败: {e}")
+        else:
+            err = getattr(self.candidate_service, 'last_error', '') or ''
+            self.school_count_label.setText(f"加载失败: {err}")
             self.school_count_label.setStyleSheet("color: red;")
-            return False
+        return ok
 
     def browse_school_list(self):
         """浏览选择学校名单文件"""
@@ -442,6 +433,7 @@ class AutomationPage(QWidget):
     def toggle_school_filter(self, state):
         """切换学校筛选状态"""
         self.school_filter_enabled = state == 2
+        self.candidate_service.set_filter_enabled(self.school_filter_enabled)
         if self.candidates:
             self.update_candidate_table()
 
@@ -508,9 +500,6 @@ class AutomationPage(QWidget):
     def auto_refresh(self):
         """初始化自动获取"""
         self.log("正在检查 Chrome 调试模式...")
-        if not self._ensure_chrome_debug():
-            return
-        self.log("正在自动连接浏览器并获取候选人列表...")
         try:
             self.refresh_candidates()
         except Exception as e:
@@ -521,22 +510,14 @@ class AutomationPage(QWidget):
     def _is_chrome_port_open(self):
         """检测 Chrome 调试端口是否已开放"""
         try:
-            return self._get_browser_manager().is_debug_port_open()
+            return self.browser_controller.manager.is_debug_port_open()
         except Exception:
             return False
-
-    def _get_browser_manager(self):
-        """获取 GUI 侧 BrowserManager（状态显示/健康检查用）"""
-        if self.browser_manager is None:
-            from browser.browser_manager import BrowserManager
-            self.browser_manager = BrowserManager(on_event=self._on_browser_event)
-        return self.browser_manager
 
     def _on_browser_event(self, event_type, message):
         """浏览器事件回调（启动/重连/断开等）"""
         self.log(f"[浏览器] {message}")
-        if self.browser_manager:
-            self.browser_state = self.browser_manager.state
+        self.browser_state = self.browser_controller.browser_state()
         self._update_browser_status()
 
     def _on_monitor_status(self, state):
@@ -546,16 +527,15 @@ class AutomationPage(QWidget):
 
     def _set_monitor_reconnect(self, allowed):
         """切换后台监控线程是否允许自动重连（任务运行期间关闭）"""
-        if self.browser_monitor is not None:
-            self.browser_monitor.set_reconnect_allowed(allowed)
+        self.browser_controller.set_monitor_reconnect(allowed)
 
     def _update_browser_status(self):
         """更新状态栏浏览器状态（优先使用后台监控线程上报的状态）"""
         from browser.browser_state import STATE_LABELS
         if self.browser_monitor is not None and self.browser_state:
             state = self.browser_state
-        elif self.browser_manager:
-            state = self.browser_manager.state
+        elif self.browser_controller.manager:
+            state = self.browser_controller.browser_state()
         else:
             state = 'DISCONNECTED'
         self.browser_status_label.setText(STATE_LABELS.get(state, f"浏览器：{state}"))
@@ -566,34 +546,10 @@ class AutomationPage(QWidget):
         else:
             self.browser_status_label.setLevel(InfoLevel.ERROR)
 
-    def _ensure_chrome_debug(self):
-        """确保 Chrome 调试模式已启动，未启动则自动启动"""
-        mgr = self._get_browser_manager()
-        if mgr.health_check():
-            self.browser_state = mgr.state or 'READY'
-            self._update_browser_status()
-            return True
-        try:
-            self.log("未检测到 Chrome 调试模式，正在自动启动 Chrome...")
-            if mgr.initialize(auto_launch=True):
-                self.log("Chrome 调试模式已启动")
-                self.browser_state = mgr.state or 'READY'
-                self._update_browser_status()
-                return True
-            self.log("Chrome 调试模式启动失败或超时，请检查 Chrome 是否已安装")
-            self._update_browser_status()
-        except Exception as e:
-            self.log(f"自动启动 Chrome 异常: {e}")
-        return False
-
     def refresh_candidates(self, switch_job=''):
         """刷新候选人列表"""
-        if self.worker_process and self.worker_process.is_alive():
+        if self.browser_controller.is_worker_alive():
             self.log("正在获取中，请等待...")
-            return
-
-        # 确保 Chrome 调试模式已启动（未启动时自动启动）
-        if not self._ensure_chrome_debug():
             return
 
         if switch_job:
@@ -601,21 +557,13 @@ class AutomationPage(QWidget):
         else:
             self.log("正在连接浏览器并获取候选人列表...")
 
+        if not self.browser_controller.collect_candidates_async(switch_job):
+            self.log("浏览器连接失败或刷新启动失败")
+            return
+
         self.set_buttons_enabled(False)
         self.current_task = 'refresh'
-        import time
-        self.worker_start_time = time.time()
-
-        self.result_queue = multiprocessing.Queue()
-
-        self.worker_process = multiprocessing.Process(
-            target=refresh_worker_target,
-            args=(self.result_queue, switch_job),
-            daemon=True
-        )
-        self.worker_process.start()
-        self._set_monitor_reconnect(False)
-
+        self.browser_controller.set_monitor_reconnect(False)
         self.check_timer.start(500)
 
     # ---------------- 下载 ----------------
@@ -627,7 +575,7 @@ class AutomationPage(QWidget):
             self.log("请先选择要下载的候选人")
             return
 
-        if self.worker_process and self.worker_process.is_alive():
+        if self.download_controller.is_worker_alive():
             self.log("有任务正在执行，请等待...")
             return
 
@@ -676,17 +624,21 @@ class AutomationPage(QWidget):
             desc = (ai_config.get("match_description") or "").strip()
             self.log(f"AI 匹配描述已生效: {desc[:60]}{'…' if len(desc) > 60 else ''}")
 
-        # 重置中断信号
-        self.stop_event.clear()
-        self.pause_event.clear()
-
         # 同步创建数据库任务，确保 task_id 在下载子进程启动前可用
-        task_id = self._create_task_and_candidates(
-            job_name, ai_config, download_dir, download_all, len(selected)
+        task_id = self.task_controller.create_and_start(
+            job_name=job_name,
+            ai_config=ai_config,
+            download_dir=download_dir,
+            download_all=download_all,
+            total=len(selected),
+            candidate_list_url=self.current_page_url,
+            selected_candidates=None if download_all else selected,
         )
         if not task_id:
             self.log("创建任务失败，无法开始下载")
             return
+        self.current_task_id = task_id
+        self.current_task_obj = self.task_controller.get_task(task_id)
 
         if download_all:
             self.log(f"开始下载所有页简历...")
@@ -706,55 +658,24 @@ class AutomationPage(QWidget):
         import time
         self.worker_start_time = time.time()
 
-        self.result_queue = multiprocessing.Queue()
-
-        # 传递 stop_event 与 task_id 给子进程
-        self.worker_process = multiprocessing.Process(
-            target=download_worker_target,
-            args=(self.result_queue, selected, download_dir, job_name,
-                  ai_config, download_all, self.stop_event, task_id,
-                  self.pause_event),
-            daemon=True
-        )
-        self.worker_process.start()
+        if not self.download_controller.start(
+            candidates=selected,
+            download_dir=download_dir,
+            job_name=job_name,
+            ai_config=ai_config,
+            download_all=download_all,
+            task_id=task_id,
+        ):
+            self.log("下载进程启动失败")
+            return
         self._set_monitor_reconnect(False)
 
         self.check_timer.start(500)
         self._update_task_status_label()
 
-    def _create_task_and_candidates(self, job_name, ai_config, download_dir, download_all, total):
-        """同步创建数据库任务并写入候选人记录，返回 task_id"""
-        try:
-            from task import TaskManager
-            tm = TaskManager()
-            task = tm.create_task(
-                job_name=job_name,
-                ai_config=ai_config if ai_config else {},
-                download_dir=download_dir,
-                download_all_pages=download_all,
-                total_candidates=total,
-                candidate_list_url=self.current_page_url,
-            )
-            self.current_task_id = task.id
-            self.current_task_obj = task
-            tm.start_task(task.id)
-            # 单页模式预写入选中候选人；分页模式由下载进程按页补充
-            if not download_all:
-                candidates = self.get_selected_candidates()
-                tm.db.add_candidates_batch(
-                    task.id,
-                    [dict(c, page=1, sort_index=i) for i, c in enumerate(candidates)]
-                )
-            tm.log(task.id, 'task_log', f'开始下载 {total} 个候选人')
-            return task.id
-        except Exception as e:
-            self.log(f"创建任务失败: {e}")
-            print(f"创建任务失败: {e}")
-            return None
-
     def pause_download(self):
         """暂停下载：当前候选人完成后暂停"""
-        self.pause_event.set()
+        self.download_controller.pause()
         self.log("已请求暂停，当前候选人处理完成后将暂停...")
         self.pause_btn.setEnabled(False)
 
@@ -762,9 +683,9 @@ class AutomationPage(QWidget):
         """点击继续任务"""
         try:
             if self.current_task_id:
-                task = self.db.get_task(self.current_task_id)
+                task = self.task_controller.get_task(self.current_task_id)
             else:
-                unfinished = self.db.get_unfinished_tasks()
+                unfinished = self.task_controller.get_unfinished_tasks()
                 task = unfinished[0] if unfinished else None
             if task:
                 self.resume_task(task)
@@ -776,7 +697,7 @@ class AutomationPage(QWidget):
 
     def stop_download(self):
         """中断下载"""
-        self.stop_event.set()
+        self.download_controller.stop()
         self.log("正在中断下载，请等待当前候选人处理完成...")
         self.stop_btn.setEnabled(False)
 
@@ -791,11 +712,11 @@ class AutomationPage(QWidget):
 
     def _update_task_status_label(self):
         """更新状态栏任务状态"""
-        if self.current_task == 'download' and self.worker_process and self.worker_process.is_alive():
+        if self.current_task == 'download' and self.download_controller.is_worker_alive():
             text = "任务状态：运行中"
             if self.current_task_id:
                 try:
-                    task = self.db.get_task(self.current_task_id)
+                    task = self.task_controller.get_task(self.current_task_id)
                     if task:
                         text = f"任务状态：运行中 {task.processed_count}/{task.total_candidates} · 第{task.current_page}页"
                 except Exception:
@@ -807,7 +728,7 @@ class AutomationPage(QWidget):
             self.task_status_label.setLevel(InfoLevel.INFOAMTION)
         elif self.current_task_id or self.last_task_id:
             try:
-                task = self.db.get_task(self.current_task_id or self.last_task_id)
+                task = self.task_controller.get_task(self.current_task_id or self.last_task_id)
                 if task:
                     status_text = {
                         'running': '运行中',
@@ -865,87 +786,83 @@ class AutomationPage(QWidget):
         self._progress_anim = anim  # 持有引用，防止动画被 GC
 
     def check_worker_status(self):
-        """检查子进程状态"""
+        """检查子进程状态（refresh 归 BrowserController，download 归 DownloadController）"""
         try:
             self._update_task_status_label()
 
             # 浏览器监控由后台线程负责：任务运行期间关闭自动重连，空闲时自动恢复
             self._set_monitor_reconnect(
-                not (self.worker_process and self.worker_process.is_alive())
+                not (self.browser_controller.is_worker_alive()
+                     or self.download_controller.is_worker_alive())
             )
 
-            if not self.worker_process:
-                self.check_timer.stop()
-                self.set_buttons_enabled(True)
-                self.start_btn.setVisible(True)
-                self.stop_btn.setVisible(False)
-                self.pause_btn.setVisible(False)
-                self._update_task_status_label()
+            # 无任务：不读取任何 worker queue，直接清理返回
+            if self.current_task is None:
+                self._reset_task_ui()
                 return
 
-            if self.worker_process.is_alive():
-                # 下载中实时更新进度条（平滑动画）
-                if self.current_task == 'download' and self.current_task_id:
-                    try:
-                        task = self.db.get_task(self.current_task_id)
-                        if task and task.total_candidates:
-                            self._animate_progress(task.processed_count, task.total_candidates)
-                    except Exception:
-                        pass
-                # 刷新任务看门狗：超过90秒无结果则终止，避免界面卡死
-                import time
-                if (self.current_task == 'refresh' and self.worker_start_time
-                        and time.time() - self.worker_start_time > 90):
-                    self.log("刷新超时，已终止该次获取，请重试")
-                    self.worker_process.terminate()
-                    self.worker_process.join(timeout=3)
-                    self.worker_process = None
-                    self.current_task = None
-                    self.worker_start_time = None
-                    self.check_timer.stop()
-                    self.set_buttons_enabled(True)
-                    self.start_btn.setVisible(True)
-                    self.stop_btn.setVisible(False)
-                    self.pause_btn.setVisible(False)
-                return
+            # ---- refresh 分支：BrowserController 管理 ----
+            if self.current_task == 'refresh':
+                if self.browser_controller.is_worker_alive():
+                    # 看门狗：超过90秒无结果则终止，避免界面卡死
+                    if self.browser_controller.refresh_elapsed() > 90:
+                        self.log("刷新超时，已终止该次获取，请重试")
+                        self.browser_controller.kill_worker()
+                        self._reset_task_ui()
+                    return
 
-            self.check_timer.stop()
-            self.progress_bar.setVisible(False)
-            self.set_buttons_enabled(True)
-            self.start_btn.setVisible(True)
-            self.stop_btn.setVisible(False)
-            self.pause_btn.setVisible(False)
-
-            if self.result_queue and not self.result_queue.empty():
-                result = self.result_queue.get()
-
-                if self.current_task == 'refresh':
+                result = self.browser_controller.poll_result()
+                if result is not None:
                     self._on_refresh_finished(result)
-                elif self.current_task == 'download':
+                else:
+                    self.log("任务失败：无结果")
+                self.browser_controller.kill_worker()
+                self._reset_task_ui()
+                return
+
+            # ---- download 分支：DownloadController 管理 ----
+            if self.current_task == 'download':
+                if self.download_controller.is_worker_alive():
+                    # 下载中实时更新进度条（平滑动画）
+                    if self.current_task_id:
+                        try:
+                            task = self.task_controller.get_task(self.current_task_id)
+                            if task and task.total_candidates:
+                                self._animate_progress(task.processed_count, task.total_candidates)
+                        except Exception:
+                            pass
+                    return
+
+                result = self.download_controller.poll_result()
+                if result is not None:
                     self._on_download_finished(result)
                     if result.get('paused') or result.get('login_expired'):
                         self.resume_btn.setVisible(True)
                         self.resume_btn.setEnabled(True)
                     else:
                         self.resume_btn.setVisible(False)
+                else:
+                    self.log("任务失败：无结果")
+                self._reset_task_ui()
+                return
 
-            else:
-                self.log("任务失败：无结果")
-
-            self.current_task = None
-            self.worker_start_time = None
-            self._update_task_status_label()
         except Exception as e:
             import traceback
             self.log(f"检查任务状态异常: {e}")
             traceback.print_exc()
-            self.current_task = None
-            self.worker_start_time = None
-            self.check_timer.stop()
-            self.set_buttons_enabled(True)
-            self.start_btn.setVisible(True)
-            self.stop_btn.setVisible(False)
-            self.pause_btn.setVisible(False)
+            self._reset_task_ui()
+
+    def _reset_task_ui(self):
+        """任务结束统一清理：停 timer、隐藏进度、恢复按钮、清 current_task（幂等）"""
+        self.check_timer.stop()
+        self.progress_bar.setVisible(False)
+        self.set_buttons_enabled(True)
+        self.start_btn.setVisible(True)
+        self.stop_btn.setVisible(False)
+        self.pause_btn.setVisible(False)
+        self.current_task = None
+        self.worker_start_time = None
+        self._update_task_status_label()
 
     def _on_refresh_finished(self, result):
         """刷新完成回调"""
@@ -1002,7 +919,10 @@ class AutomationPage(QWidget):
 
             total = len(kept)
             if self.school_filter_enabled:
-                filtered = sum(1 for c in kept if self.is_school_allowed(c.get('school', '')))
+                filtered = sum(
+                    1 for c in kept
+                    if self.candidate_service.is_school_allowed(c.get('school', ''))
+                )
                 self.log(
                     f"获取到 {len(candidates)} 个候选人，历史过滤后 {total} 个，"
                     f"学校筛选后 {filtered} 个"
@@ -1032,52 +952,10 @@ class AutomationPage(QWidget):
             (保留的候选人列表, {'downloaded': n, 'ai_rejected': n})
             已下载 / AI淘汰 的候选人被过滤；失败/有失败原因的保留并展示记录。
         """
-        self.candidate_history = {}
-        if not candidates:
-            return [], {'downloaded': 0, 'ai_rejected': 0}
-
-        try:
-            from db.models import generate_candidate_external_id
-
-            def ext_id_of(c):
-                return generate_candidate_external_id(
-                    c.get('name', ''),
-                    c.get('school', '') or '',
-                    c.get('major', '') or '',
-                )
-
-            ext_ids = [ext_id_of(c) for c in candidates if c.get('name')]
-            self.candidate_history = self.db.get_candidates_history(ext_ids)
-        except Exception as e:
-            print(f"加载候选人历史记录失败: {e}")
-            self.candidate_history = {}
-
-        kept = []
-        counts = {'downloaded': 0, 'ai_rejected': 0}
-        for c in candidates:
-            rec = None
-            if c.get('name'):
-                try:
-                    from db.models import generate_candidate_external_id
-                    ext_id = generate_candidate_external_id(
-                        c.get('name', ''),
-                        c.get('school', '') or '',
-                        c.get('major', '') or '',
-                    )
-                    rec = self.candidate_history.get(ext_id)
-                except Exception:
-                    rec = None
-            status = rec.get('status') if rec else None
-            if status == 'downloaded':
-                counts['downloaded'] += 1
-                continue
-            if status == 'ai_rejected':
-                counts['ai_rejected'] += 1
-                continue
-            kept.append(c)
-
-        if self.candidate_history:
-            self.log(f"{len(self.candidate_history)} 个候选人存在历史处理记录")
+        self.candidate_service.load_history(candidates)
+        kept, counts = self.candidate_service.filter_by_history(candidates)
+        if self.candidate_service.history:
+            self.log(f"{len(self.candidate_service.history)} 个候选人存在历史处理记录")
         return kept, counts
 
     def _startup_check_unfinished(self):
@@ -1103,10 +981,10 @@ class AutomationPage(QWidget):
             return
         self._unfinished_checked = True
         try:
-            unfinished = self.db.get_unfinished_tasks()
+            unfinished = self.task_controller.get_unfinished_tasks()
             if unfinished:
                 task = unfinished[0]
-                stats = self.db.get_task_stats(task.id)
+                stats = self.task_controller.get_task_stats(task.id)
                 browser_text, login_text = self._get_browser_login_status()
                 msg = QMessageBox(self)
                 msg.setWindowTitle("恢复任务")
@@ -1129,104 +1007,61 @@ class AutomationPage(QWidget):
                 if clicked == resume_btn:
                     self.resume_task(task)
                 elif clicked == abandon_btn:
-                    self.db.update_task_status(task.id, 'cancelled')
-                    self.db.add_task_log(task.id, 'info', '用户放弃任务', event_type='task_paused')
+                    self.task_controller.cancel_task(task.id, '用户放弃任务')
                     self.log(f"已放弃任务 #{task.id}")
         except Exception as e:
             print(f"检查未完成任务失败: {e}")
 
     def _get_browser_login_status(self):
         """获取 GUI 侧浏览器/登录状态文本（用于恢复任务对话框）"""
-        from browser.page_detector import PageDetector, LoginStatus
         from browser.browser_state import STATE_LABELS
         browser_text = '未连接'
         login_text = '未知'
         try:
-            mgr = self._get_browser_manager()
+            mgr = self.browser_controller.manager
             state = mgr.state if mgr else 'DISCONNECTED'
             browser_text = STATE_LABELS.get(state, state)
-            page = mgr.get_page() if mgr else None
-            if page:
-                status = PageDetector.is_logged_in(page=page)
-                login_text = {
-                    LoginStatus.LOGGED_IN: '正常',
-                    LoginStatus.EXPIRED: '已失效',
-                    LoginStatus.UNKNOWN: '未知',
-                }.get(status, '未知')
+            status = self.browser_controller.get_login_status()
+            login_text = {
+                'logged_in': '正常',
+                'expired': '已失效',
+                'unknown': '未知',
+            }.get(status, '未知')
         except Exception:
             pass
         return browser_text, login_text
 
-    def _switch_job_in_page(self, page, job_name):
-        """在当前页面切换到指定岗位（返回是否成功）"""
-        try:
-            return page.evaluate('''(targetName) => {
-                const items = document.querySelectorAll('.job_name_text');
-                for (const el of items) {
-                    if (el.textContent.trim() === targetName) {
-                        const wrap = el.closest('.job_name_wrap') || el.closest('.menu-item') || el;
-                        wrap.click();
-                        return true;
-                    }
-                }
-                return false;
-            }''', job_name)
-        except Exception:
-            return False
-
-    def _go_to_page(self, page, page_num):
-        """定位到指定页码的候选人列表（尽力而为）"""
-        if not page or not page_num or page_num <= 1:
-            return True
-        try:
-            return page.evaluate('''(targetPage) => {
-                const items = document.querySelectorAll('.eh-pagination__pagelist li');
-                for (const el of items) {
-                    if (el.textContent.trim() === String(targetPage)) {
-                        el.click();
-                        return true;
-                    }
-                }
-                return false;
-            }''', page_num)
-        except Exception:
-            return False
-
     def resume_task(self, task):
         """恢复任务"""
         try:
-            from browser.page_detector import PageDetector, PageType, LoginStatus
-            from task import TaskManager
-
             # 1. 浏览器检查
-            mgr = self._get_browser_manager()
-            if not mgr.initialize(auto_launch=True):
-                self.log(f"浏览器连接失败，无法恢复任务: {mgr.last_error}")
+            if not self.browser_controller.ensure_ready():
+                self.log(f"浏览器连接失败，无法恢复任务: {self.browser_controller.manager.last_error}")
                 return
-            page = mgr.get_page()
+            page = self.browser_controller.get_page()
             if not page:
                 self.log("未找到浏览器页面，无法恢复任务")
                 return
 
             # 2. 登录状态检查
-            login_status = PageDetector.is_logged_in(page=page)
-            if login_status == LoginStatus.EXPIRED:
+            login_status = self.browser_controller.get_login_status()
+            if login_status == 'expired':
                 self.log("前程无忧登录状态已失效，请重新登录后点击“继续任务”")
-                self.db.update_task_status(task.id, 'paused')
+                self.task_controller.pause_task(task.id, '登录状态失效')
                 self.resume_btn.setVisible(True)
                 self.resume_btn.setEnabled(True)
                 return
 
             # 3. 页面类型检查（必须是候选人列表/职位列表页）
-            page_type = PageDetector.detect(page=page)
-            if page_type not in (PageType.CANDIDATE_LIST_PAGE, PageType.JOB_LIST_PAGE):
+            page_type = self.browser_controller.get_page_type()
+            if page_type not in ('CANDIDATE_LIST_PAGE', 'JOB_LIST_PAGE'):
                 self.log(f"当前页面不是候选人列表页（{page_type}），请先在 Chrome 中打开人才管理页面")
                 self.resume_btn.setVisible(True)
                 self.resume_btn.setEnabled(True)
                 return
 
             # 4. 岗位匹配检查
-            current_job = PageDetector.get_current_job(page)
+            current_job = self.browser_controller.get_current_job()
             if current_job and task.job_name and current_job != task.job_name:
                 reply = QMessageBox.question(
                     self, "岗位不匹配",
@@ -1238,34 +1073,33 @@ class AutomationPage(QWidget):
                 if reply != QMessageBox.StandardButton.Yes:
                     self.log("岗位不匹配，任务保持暂停")
                     return
-                if not self._switch_job_in_page(page, task.job_name):
+                if not self.browser_controller.switch_job(task.job_name):
                     self.log("切换岗位失败，请手动在 Chrome 中切换后重试")
                     return
                 import time as _t
                 _t.sleep(5)
-                page = mgr.get_page()
-                if page and PageDetector.get_current_job(page) != task.job_name:
+                page = self.browser_controller.get_page()
+                if page and self.browser_controller.get_current_job() != task.job_name:
                     self.log("岗位切换未生效，请手动切换后重试")
                     return
 
             # 5. 定位任务当前页
             if page and task.current_page and task.current_page > 1:
-                self._go_to_page(page, task.current_page)
+                self.browser_controller.go_to_page(task.current_page)
                 import time as _t
                 _t.sleep(2)
-                page = mgr.get_page()
+                page = self.browser_controller.get_page()
 
             # 6. 获取可恢复候选人（pending/processing/failed，跳过已下载/已淘汰）
-            tm = TaskManager()
-            recoverable = tm.get_recoverable_candidates(task.id)
+            recoverable = self.task_controller.get_recoverable_candidates(task.id)
             if not recoverable:
                 self.log(f"任务 #{task.id} 没有待处理的候选人，标记为完成")
-                tm.complete_task(task.id)
+                self.task_controller.complete_task(task.id)
                 self.resume_btn.setVisible(False)
                 return
 
             # 标记任务为运行中
-            tm.resume_task(task.id)
+            self.task_controller.resume_task(task.id)
             self.current_task_id = task.id
             self.current_task_obj = task
 
@@ -1276,8 +1110,8 @@ class AutomationPage(QWidget):
 
             # 从任务快照恢复 AI 配置
             ai_config = None
-            snapshot = tm.db.get_task(task.id)
-            restored = tm.restore_ai_snapshot(snapshot.ai_config_snapshot) if snapshot else {}
+            snapshot = self.task_controller.get_task(task.id)
+            restored = self.task_controller.restore_ai_config(snapshot)
             if restored.get('enabled') and restored.get('api_key'):
                 ai_config = restored
             elif task.ai_enabled and task.ai_api_key:
@@ -1305,10 +1139,6 @@ class AutomationPage(QWidget):
             self.log(f"恢复任务 #{task.id}: {task.job_name}，待处理 {len(candidates)} 个候选人")
             self.log("已完成浏览器/登录/岗位校验")
 
-            # 重置中断信号
-            self.stop_event.clear()
-            self.pause_event.clear()
-
             self.start_btn.setVisible(False)
             self.stop_btn.setVisible(True)
             self.stop_btn.setEnabled(True)
@@ -1321,15 +1151,16 @@ class AutomationPage(QWidget):
             import time
             self.worker_start_time = time.time()
 
-            self.result_queue = multiprocessing.Queue()
-            self.worker_process = multiprocessing.Process(
-                target=download_worker_target,
-                args=(self.result_queue, candidates, download_dir, task.job_name,
-                      ai_config, False, self.stop_event, task.id,
-                      self.pause_event),
-                daemon=True
-            )
-            self.worker_process.start()
+            if not self.download_controller.start(
+                candidates=candidates,
+                download_dir=download_dir,
+                job_name=task.job_name,
+                ai_config=ai_config,
+                download_all=False,
+                task_id=task.id,
+            ):
+                self.log("下载进程启动失败")
+                return
             self._set_monitor_reconnect(False)
             self.check_timer.start(500)
             self._update_task_status_label()
@@ -1345,13 +1176,23 @@ class AutomationPage(QWidget):
                 error = result.get('error', '未知错误')
                 if result.get('login_expired'):
                     self.log("前程无忧登录状态已失效，任务已暂停。请重新登录后点击“继续任务”。")
-                    self._async_update_task_on_complete([], 0, 0, 1, paused=True)
+                    self.last_task_id = self.current_task_id
+                    self.current_task_id = None
+                    self.task_controller.update_task_complete(
+                        self.last_task_id, 1, 0, 0, paused=True
+                    )
                 elif result.get('paused'):
                     self.log(f"任务已暂停: {error}")
-                    self._async_update_task_on_complete([], 0, 0, 1, paused=True)
+                    self.last_task_id = self.current_task_id
+                    self.current_task_id = None
+                    self.task_controller.update_task_complete(
+                        self.last_task_id, 1, 0, 0, paused=True
+                    )
                 else:
                     self.log(f"下载失败: {error}")
-                    self._async_update_task_on_fail(error)
+                    self.last_task_id = self.current_task_id
+                    self.current_task_id = None
+                    self.task_controller.update_task_failed(self.last_task_id, error)
                 return
             results = result.get('results', [])
             success_count = sum(1 for r in results if r.get('success'))
@@ -1361,10 +1202,14 @@ class AutomationPage(QWidget):
             self.log(f"下载完成: 成功 {success_count} 个，失败 {fail_count} 个，共 {total_pages} 页")
 
             # 异步更新数据库任务状态
-            paused = self.stop_event.is_set() or self.pause_event.is_set() or result.get('paused', False)
-            self.pause_event.clear()
-            self._async_update_task_on_complete(
-                results, success_count, fail_count, total_pages, paused=paused
+            paused = (self.download_controller.is_stopped()
+                      or self.download_controller.is_pause_requested()
+                      or result.get('paused', False))
+            self.download_controller.clear_events()
+            self.last_task_id = self.current_task_id
+            self.current_task_id = None
+            self.task_controller.update_task_complete(
+                self.last_task_id, total_pages, success_count, fail_count, paused=paused
             )
 
             # 导出结果
@@ -1375,94 +1220,26 @@ class AutomationPage(QWidget):
             self.log(f"处理下载结果异常: {e}")
             traceback.print_exc()
 
-    def _async_update_task_on_complete(self, results, success_count, fail_count, total_pages, paused=False):
-        """异步更新任务完成状态"""
-        task_id = self.current_task_id
-
-        def do_update():
-            try:
-                if not task_id:
-                    return
-                # 累计计数由下载子进程实时写入，这里只更新总页数并置最终状态
-                self.db.update_task_progress(task_id, total_pages=total_pages)
-                status = 'paused' if paused else 'completed'
-                self.db.update_task_status(task_id, status)
-                self.db.add_task_log(task_id, 'info',
-                    f'任务{"已暂停" if paused else "完成"}: 成功 {success_count}, 失败 {fail_count}')
-            except Exception as e:
-                print(f"更新任务状态失败: {e}")
-
-        self.last_task_id = task_id
-        self.current_task_id = None
-        self._run_db_thread(do_update)
-
-    def _async_update_task_on_fail(self, error):
-        """异步更新任务失败状态"""
-        task_id = self.current_task_id
-
-        def do_update():
-            try:
-                if task_id:
-                    self.db.update_task_status(task_id, 'failed')
-                    self.db.add_task_log(task_id, 'error', f'任务失败: {error}')
-            except Exception as e:
-                print(f"更新任务状态失败: {e}")
-
-        self.last_task_id = task_id
-        self.current_task_id = None
-        self._run_db_thread(do_update)
-
     def export_results(self, results):
         """导出下载结果"""
         try:
-            from datetime import datetime
-            download_dir = Path(self.download_dir_edit.text())
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            excel_path = download_dir.parent / f"result_{timestamp}.xlsx"
-
-            import pandas as pd
-            rows = []
-            for r in results:
-                status = "成功" if r.get('success') else "失败"
-                rows.append({
-                    "职位": self.current_job,
-                    "姓名": r.get('name', ''),
-                    "页码": r.get('page', ''),
-                    "下载状态": status,
-                    "AI评估": "通过" if r.get('ai_pass') is True else ("不通过" if r.get('ai_pass') is False else "未评估"),
-                    "AI理由": r.get('ai_reason', ''),
-                    "文件路径": r.get('file_path', ''),
-                    "错误/原因": r.get('error', ''),
-                })
-
-            df = pd.DataFrame(rows)
-            df.to_excel(excel_path, index=False, sheet_name="下载结果")
+            excel_path = self.candidate_service.export_excel(
+                results,
+                self.current_job,
+                self.download_dir_edit.text(),
+            )
             self.log(f"结果已导出: {excel_path}")
         except Exception as e:
             self.log(f"导出结果失败: {e}")
 
     # ---------------- 候选人表格 ----------------
 
-    def is_school_allowed(self, school):
-        """检查学校是否在允许名单中"""
-        if not school or not self.school_filter_enabled:
-            return True
-
-        if school in self.allowed_schools:
-            return True
-
-        for allowed in self.allowed_schools:
-            if allowed in school or school in allowed:
-                return True
-
-        return False
-
     def update_candidate_table(self):
         """更新候选人表格"""
         display_candidates = []
         for c in self.candidates:
             if self.school_filter_enabled:
-                if self.is_school_allowed(c.get('school', '')):
+                if self.candidate_service.is_school_allowed(c.get('school', '')):
                     display_candidates.append(c)
             else:
                 display_candidates.append(c)
@@ -1490,7 +1267,7 @@ class AutomationPage(QWidget):
 
             school = candidate.get('school', '')
             school_item = QTableWidgetItem(school)
-            if school and not self.is_school_allowed(school):
+            if school and not self.candidate_service.is_school_allowed(school):
                 school_item.setForeground(QColor(255, 0, 0))
             self.candidate_table.setItem(i, 2, school_item)
 
@@ -1501,7 +1278,7 @@ class AutomationPage(QWidget):
             self.candidate_table.setItem(i, 4, QTableWidgetItem(education))
 
             # 处理记录列（历史下载结果/失败原因）
-            record = self._candidate_history_for(candidate)
+            record = self.candidate_service.get_history_for(candidate)
             if record['text']:
                 dot_colors = {
                     '失败': '#DC2626',
@@ -1521,47 +1298,6 @@ class AutomationPage(QWidget):
                 self.candidate_table.setCellWidget(i, 5, badge)
             else:
                 self.candidate_table.setItem(i, 5, QTableWidgetItem(''))
-
-    def _candidate_history_for(self, candidate):
-        """返回候选人的历史处理记录展示信息（文本/悬浮提示/颜色）"""
-        try:
-            from db.models import generate_candidate_external_id
-            ext_id = generate_candidate_external_id(
-                candidate.get('name', ''),
-                candidate.get('school', '') or '',
-                candidate.get('major', '') or '',
-            )
-        except Exception:
-            ext_id = ''
-
-        rec = self.candidate_history.get(ext_id)
-        if not rec:
-            return {'text': '', 'tooltip': '', 'color': None}
-
-        status = rec.get('status', '') or ''
-        error = rec.get('error_message', '') or ''
-        ai_reason = rec.get('ai_reason', '') or ''
-        job = rec.get('job_name', '') or ''
-        ts = rec.get('updated_at', '') or ''
-
-        if status == 'failed':
-            text, color = '失败', (200, 0, 0)
-            detail = error or '下载失败'
-        elif status == 'downloaded':
-            text, color = '已下载', (0, 140, 0)
-            detail = '下载成功'
-        elif status == 'ai_rejected':
-            text, color = 'AI淘汰', (200, 120, 0)
-            detail = ai_reason or 'AI评估不通过'
-        elif error:
-            text, color = '失败', (200, 0, 0)
-            detail = error
-        else:
-            text, color = (status or '有记录'), (120, 120, 120)
-            detail = status or ''
-
-        tooltip = f"岗位: {job}\n状态: {detail}\n时间: {ts}"
-        return {'text': text, 'tooltip': tooltip, 'color': color}
 
     def select_all_candidates(self):
         for i in range(self.candidate_table.rowCount()):

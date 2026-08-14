@@ -39,6 +39,15 @@ def _error_dict(error: str) -> dict:
     }
 
 
+def worker_main(queue, switch_job=''):
+    """刷新采集子进程目标函数（供 BrowserController 的 multiprocessing 使用）"""
+    try:
+        result = run(switch_job)
+        queue.put(result)
+    except Exception as e:
+        queue.put({'success': False, 'error': str(e)})
+
+
 def run(switch_job=''):
     """执行浏览器连接和候选人获取（生命周期壳 + Workflow 调用 + dict 序列化）"""
     from browser.browser_manager import BrowserManager

@@ -33,6 +33,9 @@ class SchoolFilter:
             file_path: Excel文件路径
         """
         try:
+            # 重新加载时重置（对齐线上行为：加载即替换，不累积旧名单）
+            self.allowed_schools = set()
+            self.school_info = {}
             df = pd.read_excel(file_path)
 
             # 清理学校名称（去除空格等）

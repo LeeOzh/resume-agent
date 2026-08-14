@@ -78,6 +78,12 @@ class SiteBoss(SiteAdapter):
     def switch_job(self, driver, job_name: str) -> bool:
         return True
 
+    def go_to_page(self, driver, page_num: int) -> bool:
+        return True
+
+    def get_current_job(self, driver) -> str:
+        return ''
+
     def extract_pagination(self, driver) -> dict:
         return {'currentPage': 1, 'totalPages': 3}
 

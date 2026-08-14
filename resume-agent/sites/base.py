@@ -59,6 +59,14 @@ class SiteAdapter(ABC):
         """切换到指定职位（定位并点击），返回是否成功"""
 
     @abstractmethod
+    def go_to_page(self, driver, page_num: int) -> bool:
+        """定位到指定页码（站点特有分页 DOM），返回是否成功"""
+
+    @abstractmethod
+    def get_current_job(self, driver) -> str:
+        """获取当前选中职位名（站点特有 DOM 判断），无则返回空串"""
+
+    @abstractmethod
     def extract_pagination(self, driver) -> dict:
         """提取当前页码与总页数，返回 {'currentPage': int, 'totalPages': int}"""
 

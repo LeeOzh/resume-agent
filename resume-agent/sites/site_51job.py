@@ -49,6 +49,28 @@ JS_SWITCH_JOB = '''(targetName) => {
     return false;
 }'''
 
+JS_GO_TO_PAGE = '''(targetPage) => {
+    const items = document.querySelectorAll('.eh-pagination__pagelist li');
+    for (const el of items) {
+        if (el.textContent.trim() === String(targetPage)) {
+            el.click();
+            return true;
+        }
+    }
+    return false;
+}'''
+
+JS_GET_CURRENT_JOB = '''() => {
+    const items = document.querySelectorAll('.job_name_text');
+    for (const el of items) {
+        const menuItem = el.closest('.menu-item_content');
+        if (menuItem && menuItem.classList.contains('menu-item_content_active')) {
+            return el.textContent.trim();
+        }
+    }
+    return '';
+}'''
+
 JS_GET_PAGINATION = '''() => {
     let currentPage = 1;
     let totalPages = 1;
@@ -197,6 +219,16 @@ class Site51Job(SiteAdapter):
     def switch_job(self, driver, job_name: str) -> bool:
         clicked = driver.evaluate(JS_SWITCH_JOB, job_name)
         return bool(clicked)
+
+    def go_to_page(self, driver, page_num: int) -> bool:
+        if not page_num or page_num <= 1:
+            return True
+        clicked = driver.evaluate(JS_GO_TO_PAGE, page_num)
+        return bool(clicked)
+
+    def get_current_job(self, driver) -> str:
+        result = driver.evaluate(JS_GET_CURRENT_JOB)
+        return str(result or '')
 
     def extract_pagination(self, driver) -> dict:
         result = driver.evaluate(JS_GET_PAGINATION)
