@@ -53,7 +53,7 @@ def run(switch_job=''):
     from browser.browser_manager import BrowserManager
     from browser.actions import BrowserDriver, TargetResolver
     from sites import Site51Job
-    from workflow import ResumeCollectionWorkflow
+    from bizflow import ResumeCollectionWorkflow
 
     manager = BrowserManager()
     try:

@@ -42,7 +42,7 @@ def run(candidates, download_dir, job_name='', ai_config=None,
     from browser.actions import BrowserDriver
     from sites import Site51Job
     from task import TaskManager
-    from workflow import ResumeDownloadWorkflow
+    from bizflow import ResumeDownloadWorkflow
 
     # 兼容旧调用：candidates 为纯名字列表
     if candidates and isinstance(candidates[0], str):
