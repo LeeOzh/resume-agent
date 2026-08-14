@@ -8,5 +8,6 @@ SiteAdapter 提供"站点能力"（URL/选择器/页面检测/提取/解析）�
 
 from .base import SiteAdapter
 from .site_51job import Site51Job
+from .site_boss import SiteBoss
 
-__all__ = ['SiteAdapter', 'Site51Job']
+__all__ = ['SiteAdapter', 'Site51Job', 'SiteBoss']
