@@ -8,7 +8,6 @@
 import sys
 import os
 import html
-import multiprocessing
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -86,6 +85,8 @@ class AutomationPage(QWidget):
         self.task_controller = TaskController()
         from gui.services import CandidateService
         self.candidate_service = CandidateService(self.db)
+        from gui.services import JobService
+        self.job_service = JobService(self.db)
         self.candidate_count_label = main.candidate_count_label
         self.download_count_label = main.download_count_label
         self.ai_status_label = main.ai_status_label
@@ -969,7 +970,7 @@ class AutomationPage(QWidget):
         """异步同步岗位到数据库"""
         def do_sync():
             try:
-                self.db.sync_jobs(positions)
+                self.job_service.sync_jobs(positions)
             except Exception as e:
                 print(f"同步岗位失败: {e}")
 
