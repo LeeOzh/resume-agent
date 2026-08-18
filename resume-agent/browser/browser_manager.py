@@ -13,6 +13,7 @@ BrowserManager - 浏览器生命周期统一管理（改造方案第 3 / 5 / 6 /
 """
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -21,6 +22,11 @@ from .browser_config import (
     RECONNECT_WAITS, URL_51JOB_TALENT_MANAGEMENT,
 )
 from .browser_state import BrowserState
+
+
+# 进程级互斥锁：页面侧 BrowserController 与后台 BrowserMonitorThread 可能并发
+# 触发 launch_chrome，需保证"检查端口 + 启动 Chrome"原子化，避免启动多个 Chrome。
+_LAUNCH_LOCK = threading.Lock()
 
 
 class BrowserManager:
@@ -97,37 +103,39 @@ class BrowserManager:
             return False
 
         try:
-            if self.is_debug_port_open():
-                return True
-
-            self.profile_dir.mkdir(parents=True, exist_ok=True)
-            cmd = [
-                chrome_path,
-                f"--remote-debugging-port={self.port}",
-                f"--user-data-dir={self.profile_dir}",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-popup-blocking",
-                "--disable-translate",
-                # 问题9：新版 Chrome 对 CDP 有 Origin 校验，缺少该参数会导致连接被拒
-                "--remote-allow-origins=*",
-            ]
-            self.chrome_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-
-            for _ in range(wait_seconds):
-                time.sleep(1)
+            # 互斥锁：防止多个 BrowserManager 实例（页面侧 + 监控线程）并发启动 Chrome
+            with _LAUNCH_LOCK:
                 if self.is_debug_port_open():
-                    self._emit('browser_started', f'Chrome 调试端口 {self.port} 已就绪')
                     return True
 
-            self.last_error = f"等待 Chrome 调试端口超时（{wait_seconds}s）"
-            self._set_state(BrowserState.ERROR)
-            return False
+                self.profile_dir.mkdir(parents=True, exist_ok=True)
+                cmd = [
+                    chrome_path,
+                    f"--remote-debugging-port={self.port}",
+                    f"--user-data-dir={self.profile_dir}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-popup-blocking",
+                    "--disable-translate",
+                    # 问题9：新版 Chrome 对 CDP 有 Origin 校验，缺少该参数会导致连接被拒
+                    "--remote-allow-origins=*",
+                ]
+                self.chrome_process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+
+                for _ in range(wait_seconds):
+                    time.sleep(1)
+                    if self.is_debug_port_open():
+                        self._emit('browser_started', f'Chrome 调试端口 {self.port} 已就绪')
+                        return True
+
+                self.last_error = f"等待 Chrome 调试端口超时（{wait_seconds}s）"
+                self._set_state(BrowserState.ERROR)
+                return False
         except Exception as e:
             self.last_error = f"启动Chrome失败: {e}"
             self._set_state(BrowserState.ERROR)
