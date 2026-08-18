@@ -1,4 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
+"""onedir 打包配置：解决性能差/安全软件环境下单文件自解压慢或被拦截的问题。
+输出：dist/林林专属助手/（文件夹，整体分发或 zip）"""
 import sys
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
@@ -12,7 +14,6 @@ openai_datas, openai_binaries, openai_hiddenimports = collect_all('openai')
 pyqt5_datas, pyqt5_binaries, pyqt5_hiddenimports = collect_all('PyQt5')
 
 # wechat monitor: pywechat127 (pyweixin) and its dependency chain.
-# skip collection gracefully when a package is not installed on the build machine.
 _wechat_pkgs = [
     'pywechat', 'pyweixin', 'pywinauto', 'pyautogui', 'comtypes',
     'pywin32', 'pycaw', 'sounddevice', 'soundfile', 'emoji',
@@ -81,10 +82,8 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='林林专属助手',
     debug=False,
     bootloader_ignore_signals=False,
@@ -92,11 +91,21 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,  # GUI版本不显示控制台
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
     icon=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    name='林林专属助手',
+    upx=True,
+    upx_exclude=[],
 )

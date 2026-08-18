@@ -7,8 +7,8 @@
 - 双击标题栏最大化/还原
 - 最小化 / 最大化/还原 / 关闭 按钮（使用 Windows 自带 Segoe MDL2 Assets 图标）
 """
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QToolButton, QWidget
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QHBoxLayout, QLabel, QToolButton, QWidget
 
 
 class TitleBar(QWidget):
@@ -54,13 +54,13 @@ class TitleBar(QWidget):
         btn.setToolTip(tip)
         btn.setFixedSize(46, self.HEIGHT)
         btn.setFont(self._mdl2_font())
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFocusPolicy(Qt.NoFocus)
         return btn
 
     @staticmethod
     def _mdl2_font():
-        from PyQt6.QtGui import QFont
+        from PyQt5.QtGui import QFont
         font = QFont("Segoe MDL2 Assets")
         font.setPixelSize(12)
         return font
@@ -82,19 +82,19 @@ class TitleBar(QWidget):
             self.max_btn.setToolTip("最大化")
 
     def on_window_state_changed(self, state):
-        self._update_max_icon(bool(state & Qt.WindowState.WindowMaximized))
+        self._update_max_icon(bool(state & Qt.WindowMaximized))
 
     # ==================== 拖拽 ====================
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() == Qt.LeftButton:
             win = self.window()
             if not win.isMaximized():
                 self._drag_offset = event.globalPosition().toPoint() - win.frameGeometry().topLeft()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+        if self._drag_offset is not None and event.buttons() & Qt.LeftButton:
             win = self.window()
             if not win.isMaximized():
                 win.move(event.globalPosition().toPoint() - self._drag_offset)
@@ -105,6 +105,6 @@ class TitleBar(QWidget):
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() == Qt.LeftButton:
             self._toggle_maximize()
         super().mouseDoubleClickEvent(event)

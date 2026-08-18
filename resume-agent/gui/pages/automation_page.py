@@ -10,14 +10,14 @@ import os
 import html
 from pathlib import Path
 
-from PyQt6.QtWidgets import (
+from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTableWidget,
     QTableWidgetItem, QTextEdit, QHeaderView, QLabel, QGroupBox,
     QGridLayout, QLineEdit, QMessageBox, QProgressBar, QFileDialog,
     QFrame, QScrollArea
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QPropertyAnimation
-from PyQt6.QtGui import QFont, QColor
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, QPropertyAnimation
+from PyQt5.QtGui import QFont, QColor
 from qfluentwidgets import (
     PrimaryPushButton, PushButton, ComboBox, TableWidget,
     CheckBox as FluentCheckBox, LineEdit as FluentLineEdit, InfoLevel,
@@ -140,7 +140,7 @@ class AutomationPage(QWidget):
         layout.setContentsMargins(16, 12, 16, 8)
         layout.setSpacing(12)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(6)
         layout.addWidget(splitter, 1)
 
@@ -163,9 +163,9 @@ class AutomationPage(QWidget):
         self.candidate_table = TableWidget()
         self.candidate_table.setColumnCount(6)
         self.candidate_table.setHorizontalHeaderLabels(["选择", "姓名", "学校", "专业", "学历", "处理记录"])
-        self.candidate_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.candidate_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self.candidate_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.candidate_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.candidate_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.candidate_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
         self.candidate_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.candidate_table.setAlternatingRowColors(True)
         left_layout.addWidget(self.candidate_table)
@@ -177,7 +177,7 @@ class AutomationPage(QWidget):
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
         right_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         right_inner = QWidget()
         right_layout = QVBoxLayout(right_inner)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -329,9 +329,9 @@ class AutomationPage(QWidget):
             reply = QMessageBox.question(
                 self, "确认退出",
                 "有任务正在运行，确定要退出吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                QMessageBox.Yes | QMessageBox.No
             )
-            if reply == QMessageBox.StandardButton.No:
+            if reply == QMessageBox.No:
                 return False
             # 中断下载
             self.download_controller.stop()
@@ -1000,9 +1000,9 @@ class AutomationPage(QWidget):
                     f"登录状态：{login_text}\n\n"
                     "继续任务前会检查浏览器、登录状态与岗位匹配。"
                 )
-                resume_btn = msg.addButton("继续任务", QMessageBox.ButtonRole.AcceptRole)
-                abandon_btn = msg.addButton("放弃任务", QMessageBox.ButtonRole.DestructiveRole)
-                msg.addButton("稍后", QMessageBox.ButtonRole.RejectRole)
+                resume_btn = msg.addButton("继续任务", QMessageBox.AcceptRole)
+                abandon_btn = msg.addButton("放弃任务", QMessageBox.DestructiveRole)
+                msg.addButton("稍后", QMessageBox.RejectRole)
                 msg.exec()
                 clicked = msg.clickedButton()
                 if clicked == resume_btn:
@@ -1069,9 +1069,9 @@ class AutomationPage(QWidget):
                     f"当前 Chrome 岗位：{current_job}\n"
                     f"任务岗位：{task.job_name}\n\n"
                     "是否切换到任务岗位后继续？",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    QMessageBox.Yes | QMessageBox.No
                 )
-                if reply != QMessageBox.StandardButton.Yes:
+                if reply != QMessageBox.Yes:
                     self.log("岗位不匹配，任务保持暂停")
                     return
                 if not self.browser_controller.switch_job(task.job_name):
@@ -1250,7 +1250,7 @@ class AutomationPage(QWidget):
             # 空状态提示
             self.candidate_table.setRowCount(1)
             empty_item = QTableWidgetItem("暂无候选人，请点击“刷新列表”获取")
-            empty_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty_item.setTextAlignment(Qt.AlignCenter)
             empty_item.setForeground(QColor(148, 163, 184))
             self.candidate_table.setSpan(0, 0, 1, 6)
             self.candidate_table.setItem(0, 0, empty_item)
@@ -1295,7 +1295,7 @@ class AutomationPage(QWidget):
                     f'<span style="color:{text_color};">{html.escape(record["text"])}</span>'
                 )
                 badge.setToolTip(record['tooltip'])
-                badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                badge.setAlignment(Qt.AlignCenter)
                 self.candidate_table.setCellWidget(i, 5, badge)
             else:
                 self.candidate_table.setItem(i, 5, QTableWidgetItem(''))
