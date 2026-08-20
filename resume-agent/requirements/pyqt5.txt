@@ -1,0 +1,4 @@
+# PyQt5 兼容版（面向 Win7 / Win10 1511 等旧系统）
+-r base.txt
+PyQt5>=5.15.9
+PyQt-Fluent-Widgets>=1.6

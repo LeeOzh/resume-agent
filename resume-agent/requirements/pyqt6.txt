@@ -1,0 +1,4 @@
+# PyQt6 主版（面向 Win10 1809+）
+-r base.txt
+PyQt6>=6.5.0
+PyQt6-Fluent-Widgets>=1.11

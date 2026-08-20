@@ -32,7 +32,7 @@ def log_to_file(msg):
 def show_error(title, message):
     """显示错误对话框"""
     try:
-        from PyQt6.QtWidgets import QApplication, QMessageBox
+        from gui.qt_compat import QApplication, QMessageBox
         app = QApplication.instance()
         if app is None:
             app = QApplication(sys.argv)
@@ -46,19 +46,16 @@ def main():
     log_to_file("=== 启动开始 ===")
     
     try:
-        log_to_file("导入PyQt6...")
-        from PyQt6.QtWidgets import QApplication
-        from PyQt6.QtCore import Qt
-        log_to_file("PyQt6导入成功")
+        log_to_file("导入Qt...")
+        from gui.qt_compat import QApplication, enable_high_dpi, exec_app
+        log_to_file("Qt导入成功")
         
         log_to_file("导入MainWindow...")
         from gui.main_window import MainWindow
         log_to_file("MainWindow导入成功")
 
-        # 设置高DPI支持
-        QApplication.setHighDpiScaleFactorRoundingPolicy(
-            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
-        )
+        # 设置高DPI支持（qt_compat 统一处理 PyQt5/PyQt6 差异）
+        enable_high_dpi()
         
         log_to_file("创建QApplication...")
         app = QApplication(sys.argv)
@@ -78,7 +75,7 @@ def main():
         
         # 运行应用程序
         log_to_file("进入事件循环...")
-        sys.exit(app.exec())
+        sys.exit(exec_app(app))
         
     except Exception as e:
         error_msg = f"启动失败: {str(e)}\n\n{traceback.format_exc()}"

@@ -6,7 +6,7 @@
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from gui.qt_compat import QThread, pyqtSignal
 
 from wechat.wechat_config import load_wechat_config, resolve_save_dir
 from wechat.wechat_manager import WeChatManager
