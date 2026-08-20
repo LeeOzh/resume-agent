@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from gui.qt_compat import HeaderStretch, TextSelectableByMouse, UserRole
 """
 微信简历解析页面（V1 极简功能）
 
@@ -15,11 +16,11 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtWidgets import (
+from gui.qt_compat import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QHeaderView, QLabel, QTextEdit, QMessageBox, QInputDialog, QGroupBox,
 )
-from PyQt6.QtCore import Qt
+from gui.qt_compat import Qt
 from qfluentwidgets import (
     PrimaryPushButton, PushButton, ComboBox, TableWidget,
     InfoBadge, InfoLevel, FluentIcon,
@@ -87,7 +88,7 @@ class WeChatPage(QWidget):
 
         row2.addWidget(QLabel("聊天文件目录:"))
         self.dir_label = QLabel("未检测")
-        self.dir_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.dir_label.setTextInteractionFlags(TextSelectableByMouse)
         row2.addWidget(self.dir_label, 1)
         control_layout.addLayout(row2)
 
@@ -144,8 +145,8 @@ class WeChatPage(QWidget):
         self.records_table.setHorizontalHeaderLabels(
             ["时间", "群", "文件名", "姓名", "状态", "发送人", "备注", "文件路径"]
         )
-        self.records_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self.records_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
+        self.records_table.horizontalHeader().setSectionResizeMode(2, HeaderStretch)
+        self.records_table.horizontalHeader().setSectionResizeMode(7, HeaderStretch)
         self.records_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.records_table.setAlternatingRowColors(True)
         table_layout.addWidget(self.records_table)
@@ -198,7 +199,7 @@ class WeChatPage(QWidget):
 
     def pick_chatfile_dir(self):
         """手动选择微信聊天文件目录（自动检测失败时使用）"""
-        from PyQt6.QtWidgets import QFileDialog
+        from gui.qt_compat import QFileDialog
         folder = QFileDialog.getExistingDirectory(
             self, "选择微信聊天文件目录（xwechat_files/<wxid>/msg/file）"
         )
@@ -311,7 +312,7 @@ class WeChatPage(QWidget):
         for col, value in enumerate(values):
             item = QTableWidgetItem(str(value))
             if col == 0:
-                item.setData(Qt.ItemDataRole.UserRole, record.get('id'))
+                item.setData(UserRole, record.get('id'))
             self.records_table.setItem(row, col, item)
         self._update_count()
 
@@ -339,7 +340,7 @@ class WeChatPage(QWidget):
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 if col == 0:
-                    item.setData(Qt.ItemDataRole.UserRole, record.get('id'))
+                    item.setData(UserRole, record.get('id'))
                 self.records_table.setItem(row, col, item)
         self._update_count()
 
@@ -355,7 +356,7 @@ class WeChatPage(QWidget):
             self.log("请先在表格中选择一行记录")
             return
         id_item = self.records_table.item(row, 0)
-        record_id = id_item.data(Qt.ItemDataRole.UserRole) if id_item else None
+        record_id = id_item.data(UserRole) if id_item else None
         if not record_id:
             self.log("无法获取选中记录")
             return

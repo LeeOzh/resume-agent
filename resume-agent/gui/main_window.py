@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from gui.qt_compat import HeaderStretch
 """
 主窗口模块 - 林林专属助手
 
@@ -14,13 +15,14 @@ import sys
 import os
 from pathlib import Path
 
-from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QDialog, QMessageBox, QStatusBar, QGroupBox, QGridLayout, QLineEdit,
-    QTableWidget, QTableWidgetItem, QHeaderView, QStackedWidget,
+from gui.qt_compat import (
+QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+QDialog, QMessageBox, QStatusBar, QGroupBox, QGridLayout, QLineEdit,
+DialogAccepted,
+QTableWidget, QTableWidgetItem, QHeaderView, QStackedWidget,
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction, QShortcut, QKeySequence
+from gui.qt_compat import Qt, QTimer
+from gui.qt_compat import QAction, QShortcut, QKeySequence
 from qfluentwidgets import (
     FluentIcon, PrimaryPushButton, PushButton, ComboBox, TableWidget,
     CheckBox as FluentCheckBox, LineEdit as FluentLineEdit,
@@ -275,7 +277,7 @@ class MainWindow(QMainWindow):
 
     def show_ai_config(self):
         dialog = AIConfigDialog(self.automation_page)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        if dialog.exec() == DialogAccepted:
             self._update_ai_status()
             self.automation_page.log("AI 配置已保存")
 
@@ -348,7 +350,7 @@ class AIConfigDialog(QDialog):
         self.desc_table = TableWidget()
         self.desc_table.setColumnCount(2)
         self.desc_table.setHorizontalHeaderLabels(["岗位名称", "匹配描述"])
-        self.desc_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.desc_table.horizontalHeader().setSectionResizeMode(1, HeaderStretch)
         self.desc_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         # 行高足够容纳输入框（QSS padding 7px 会把行内输入框压扁、文字不可见）
         self.desc_table.verticalHeader().setVisible(False)

@@ -9,7 +9,7 @@
 """
 import time
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from gui.qt_compat import QThread, pyqtSignal
 
 
 class BrowserMonitorThread(QThread):

@@ -9,7 +9,7 @@ TaskController - 任务控制器（Phase 3A）。
 
 结构：AutomationPage -> TaskController -> TaskManager -> Database
 """
-from PyQt6.QtCore import QThread, pyqtSignal
+from gui.qt_compat import QThread, pyqtSignal
 
 
 class _TaskDbThread(QThread):
