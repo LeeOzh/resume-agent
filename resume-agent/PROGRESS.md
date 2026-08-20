@@ -1,5 +1,15 @@
 # GUI改造进度说明
 
+## 2026-08-20 qt_compat 单分支双 Qt 方案（已合并主分支）
+
+- 引入 `gui/qt_compat.py`：QT_BINDING 显式选择（未设置自动探测优先 PyQt6）
+  + 全导出 Qt 类 + 15 枚举别名 + enable_high_dpi + exec_app
+- 9 个 GUI 文件 import/枚举统一到 qt_compat，业务代码零 Qt 版本判断
+- requirements 拆分 base / pyqt5 / pyqt6；双 onedir spec（name 区分）+ 双 build bat
+- pyqt5 venv 隔离环境；全局环境纯 PyQt6（避免 qfluentwidgets 双包冲突 + PyInstaller 多 Qt 冲突）
+- 双版本打包：林林专属助手-PyQt5（377MB）/ 林林专属助手-PyQt6（438MB）
+- 分支定位：codex/browser-actions-refactor（主分支）、codex/qt-compat 与 codex/pyqt5-compat 保留不动
+
 ## 2026-08-14 浏览器自动化架构重构（Phase 1 ~ 4B，分支 codex/browser-actions-refactor）
 
 ### 重构目标与成果

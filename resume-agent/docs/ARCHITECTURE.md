@@ -196,6 +196,10 @@ resume-agent/
 ├── main_gui.py / main.py        # 入口
 ├── browser_worker.py            # 采集 Worker 壳（生命周期 + Workflow 调用）
 ├── download_worker.py           # 下载 Worker 壳（86 行）
+├── requirements/                # base / pyqt5 / pyqt6 拆分
+├── build_gui_pyqt6.spec         # PyQt6 onedir（→ 林林专属助手-PyQt6/）
+├── build_gui_pyqt5.spec         # PyQt5 onedir（→ 林林专属助手-PyQt5/）
+├── build_pyqt6.bat / build_pyqt5.bat  # 双版本打包入口
 ├── browser/
 │   ├── browser_manager.py       # 生命周期
 │   ├── page_detector.py         # 51job 检测（逐步迁入 SiteAdapter）
@@ -208,8 +212,9 @@ resume-agent/
 │   ├── resume_collection.py     # 采集工作流
 │   └── resume_download.py       # 下载工作流（含 evaluate_resume）
 ├── gui/
+│   ├── qt_compat.py             # Qt 绑定兼容层（QT_BINDING + 枚举别名 + HighDpi/exec）
 │   ├── controllers/             # Browser / Task / Download Controller
-│   ├── services/                # CandidateService
+│   ├── services/                # CandidateService / JobService
 │   ├── pages/                   # automation_page / wechat_page
 │   └── threads/                 # BrowserMonitorThread
 ├── task/                        # TaskManager（领域层）
@@ -221,6 +226,7 @@ resume-agent/
 ## 7. 说明与待办
 
 - **`bizflow/` 命名**：原 `workflow/` 与 PyInstaller `hook-workflow.py` 冲突导致打包失败，已重命名规避
+- **双 Qt 兼容**：`gui/qt_compat.py` 统一 PyQt5/PyQt6 差异，业务代码一套、零 Qt 版本判断；`QT_BINDING` 显式选择绑定（未设置自动探测优先 PyQt6）；打包用两个隔离 venv + 双 spec + 双 build bat
 - **wechat 模块独立**：不参与浏览器重构，保持文件目录方案
 - **AI 边界**：未抽 AIService，`evaluate_resume` 保持独立函数，Workflow 内为明确步骤
 - **待办（Phase 5 方向）**：
