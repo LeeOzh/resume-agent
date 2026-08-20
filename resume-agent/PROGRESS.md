@@ -26,12 +26,21 @@
 - 新增 onedir 打包配置 `build_gui_onedir.spec`（解决单文件自解压慢/安全软件拦截）
 - onedir 输出 `dist/林林专属助手/`（19MB 启动器 + _internal 依赖，约 433MB）
 
-### 用户环境排查（待确认）
-- 对方 Win10 1511（2015 版）+ 公司安全软件（aTrust + 终端防护中心）
-- 单文件 exe 双击无反应（无 startup.log）→ 疑似安全软件拦截
-- onedir 版有 startup.log 但报 `DLL load failed while importing QtWidgets`
-- 已让用户：7-Zip 重新压缩 + 安装 VC++ 2015-2022 x64 运行库后重试
-- 待用户反馈结果
+### 用户环境排查（已解决）
+- 对方 Win10 1511（2015 版），Windows 更新被公司锁死，无法升级
+- 根因：Qt 6.11 + Python 3.12 的视图层最低要求 Win10 1809，1511 无法加载 QtWidgets
+- 方案：PyQt5 兼容版（Qt 5.15 支持 Win7+），分支 codex/pyqt5-compat
+- 验证：对方 Win10 1511 已能正常打开使用
+- 结论：整个技术栈（PyQt5 + Python 3.12 + numpy/pandas/playwright）在 1511 上均兼容
+
+### 双版本维护说明
+- **PyQt6 主版**（分支 codex/browser-actions-refactor）：面向新系统（Win10 1809+）
+- **PyQt5 兼容版**（分支 codex/pyqt5-compat）：面向旧系统（Win7 / Win10 1511）
+- 两版本**核心逻辑完全一致**（bizflow/sites/browser/task/db/crawler 零差异），仅 GUI 层 API 不同
+- 维护约定：
+  - 业务逻辑改动（Workflow / SiteAdapter / Controller / Service / DB）→ 两个分支都要同步
+  - GUI 改动 → 分别适配 PyQt6 与 PyQt5 的 API 差异
+  - 核心 bug 修复 → cherry-pick 同步两个分支
 
 ## 已完成功能
 
